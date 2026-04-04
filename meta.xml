@@ -1,0 +1,29 @@
+<meta>
+    <info
+        author="OpenAI Codex"
+        version="2.0.0"
+        name="DX UI Creator"
+        description="In-game DX UI editor and exporter for MTA:SA"
+        type="script"
+    />
+    <script src="client.lua" type="client" cache="false" />
+    <script src="server.lua" type="server" />
+    <min_mta_version server="1.5.4-9.11342" />
+
+    <file src="assets/Gilroy-Light.ttf"    />
+    <file src="assets/Gilroy-Regular.ttf"  />
+    <file src="assets/Gilroy-Medium.ttf"   />
+    <file src="assets/Gilroy-SemiBold.ttf" />
+    <file src="assets/Gilroy-Bold.ttf"     />
+    <file src="assets/BebasNeue-Thin.ttf"    />
+    <file src="assets/BebasNeue-Light.ttf"   />
+    <file src="assets/BebasNeue-Book.ttf"    />
+    <file src="assets/BebasNeue-Regular.ttf" />
+    <file src="assets/BebasNeue-Bold.ttf"    />
+    <file src="assets/SFUIText-Light.ttf"          />
+    <file src="assets/SFUIText-Regular.ttf"        />
+    <file src="assets/SFUIText-Medium.ttf"         />
+    <file src="assets/SFUIText-Semibold.ttf"       />
+    <file src="assets/SFUIText-Bold.ttf"           />
+    <file src="assets/SFUIText-Heavy.ttf"          />
+</meta>
