@@ -2,6 +2,7 @@ local editor = {
     open = false,
     nextId = 1,
     selectedId = nil,
+    selectedIds = {},
     elements = {},
     hotboxes = {},
     interaction = nil,
@@ -27,6 +28,22 @@ local editor = {
     previewScroll = 0,
     previewScrollMax = 0,
     previewArea = nil,
+    propertySearch = "",
+    propertySearchInput = nil,
+    clipboardStyle = nil,
+    previewMode = false,
+    exportProfile = "full",
+    stylePresets = {},
+    prefabList = {},
+    rubberBand = nil,
+    clipboardElements = nil,
+    prefabInput = nil,
+    prefabScroll = 0,
+    assetSearch = "",
+    assetSearchInput = nil,
+    assetLibrary = {},
+    smartGuides = {},
+    smartSnapEnabled = true,
     canvas = {
         width = 1280,
         height = 720,
@@ -34,11 +51,12 @@ local editor = {
     },
     tooltip = nil,
     tooltipTime = 0,
+    recentColors = {},
     theme = {
-        overlay      = {8,  10, 14,  230},
-        panel        = {18, 18, 24,  250},
-        panelSoft    = {28, 28, 36,  250},
-        panelAlt     = {38, 38, 48,  250},
+        overlay      = {10, 12, 18,  200},
+        panel        = {20, 22, 30,  220},
+        panelSoft    = {32, 35, 45,  225},
+        panelAlt     = {42, 46, 60,  230},
         panelBorder  = {50, 50, 62,  120},
         text         = {240,240,248, 255},
         muted        = {130,135,155, 255},
@@ -137,12 +155,20 @@ local FONT_OPTIONS = {
 }
 local ALIGN_X_OPTIONS  = {"left","center","right"}
 local ALIGN_Y_OPTIONS  = {"top","center","bottom"}
+local ANCHOR_X_OPTIONS = {"left","center","right"}
+local ANCHOR_Y_OPTIONS = {"top","center","bottom"}
+local DOCK_OPTIONS = {"none","fill"}
+local ACTION_TYPE_OPTIONS = {"none","toggle_visibility","show","hide","toggle_checkbox","play_animation","chat_message","trigger_event"}
+local ANIMATION_TYPE_OPTIONS = {"none","fade","pulse","float","slide-left","slide-right","slide-up","slide-down","zoom"}
+local ANIMATION_TRIGGER_OPTIONS = {"auto","hover","click"}
 
 local CANVAS_PRESETS = {
     {label="1280x720",  w=1280, h=720 },
     {label="1920x1080", w=1920, h=1080},
     {label="1366x768",  w=1366, h=768 },
     {label="800x600",   w=800,  h=600 },
+    {label="2560x1440", w=2560, h=1440},
+    {label="1024x768",  w=1024, h=768 },
 }
 
 local roundedCache = {}
@@ -156,19 +182,137 @@ local _panelRTW      = 0
 local _panelRTH      = 0
 local _skipPanelDraw = false
 local _lastHoverKey  = ""
+local _cachedHotboxes = nil
 local _cachedPropertyLists = {}
 local _previewCachedRT = nil
 local _previewCachedW  = 0
 local _previewCachedH  = 0
+local _lastPreviewCacheCode = ""
+local _lastPreviewScroll = -1
 
-local function clamp(value, minV, maxV)
+local COMMON_EXPORT_KEYS = {
+    "visible", "locked", "parentId", "groupId",
+    "componentId", "componentInstanceOf", "componentDetached",
+    "anchorX", "anchorY",
+    "dockX", "dockY", "dockPaddingRight", "dockPaddingBottom",
+    "relativeW", "relativeH", "wPercent", "hPercent",
+    "clickAction", "actionTarget", "actionValue",
+    "animationType", "animationTrigger", "animationDuration", "animationLoop", "animationIntensity",
+}
+
+function clamp(value, minV, maxV)
     if value < minV then return minV end
     if value > maxV then return maxV end
     return value
 end
 
-local function round(value)
+function round(value)
     return math.floor(value + 0.5)
+end
+
+local function getAnchoredAxisPosition(anchor, offset, size, totalSize)
+    if anchor == "center" then
+        return round((totalSize - size) / 2 + offset)
+    elseif anchor == "right" or anchor == "bottom" then
+        return round(totalSize - size - offset)
+    end
+    return round(offset)
+end
+
+local function getElementCanvasRect(element)
+    local x, y, w, h
+    local baseW = (element.relativeW and element.wPercent) and round(editor.canvas.width * ((element.wPercent or 0) / 100)) or (element.w or 0)
+    local baseH = (element.relativeH and element.hPercent) and round(editor.canvas.height * ((element.hPercent or 0) / 100)) or (element.h or 0)
+    baseW = math.max(20, baseW)
+    baseH = math.max(20, baseH)
+
+    if (element.dockX or "none") == "fill" then
+        x = round(element.x or 0)
+        w = math.max(20, editor.canvas.width - x - math.max(0, element.dockPaddingRight or 0))
+    else
+        w = baseW
+        x = getAnchoredAxisPosition(element.anchorX or "left", element.x or 0, w, editor.canvas.width)
+    end
+
+    if (element.dockY or "none") == "fill" then
+        y = round(element.y or 0)
+        h = math.max(20, editor.canvas.height - y - math.max(0, element.dockPaddingBottom or 0))
+    else
+        h = baseH
+        y = getAnchoredAxisPosition(element.anchorY or "top", element.y or 0, h, editor.canvas.height)
+    end
+
+    return x, y, w, h
+end
+
+local function setElementCanvasPosition(element, canvasX, canvasY)
+    local _, _, w, h = getElementCanvasRect(element)
+    local clampedX = clamp(round(canvasX), 0, math.max(0, editor.canvas.width - w))
+    local clampedY = clamp(round(canvasY), 0, math.max(0, editor.canvas.height - h))
+
+    if (element.dockX or "none") == "fill" then
+        element.x = clampedX
+    elseif (element.anchorX or "left") == "center" then
+        element.x = round(clampedX - (editor.canvas.width - w) / 2)
+    elseif (element.anchorX or "left") == "right" then
+        element.x = round(editor.canvas.width - w - clampedX)
+    else
+        element.x = clampedX
+    end
+
+    if (element.dockY or "none") == "fill" then
+        element.y = clampedY
+    elseif (element.anchorY or "top") == "center" then
+        element.y = round(clampedY - (editor.canvas.height - h) / 2)
+    elseif (element.anchorY or "top") == "bottom" then
+        element.y = round(editor.canvas.height - h - clampedY)
+    else
+        element.y = clampedY
+    end
+end
+
+local function normalizeElementLayout(el)
+    local cw, ch = editor.canvas.width, editor.canvas.height
+    
+    if el.relativeW then
+        el.wPercent = clamp(el.wPercent or ((el.w or 20) / cw * 100), 1, 100)
+    else
+        el.w = math.max(20, el.w or 20)
+    end
+    
+    if el.relativeH then
+        el.hPercent = clamp(el.hPercent or ((el.h or 20) / ch * 100), 1, 100)
+    else
+        el.h = math.max(20, el.h or 20)
+    end
+    
+    if (el.dockX or "none") == "fill" then
+        el.dockPaddingRight = math.max(0, el.dockPaddingRight or 0)
+        el.x = clamp(el.x or 0, 0, math.max(0, cw - 20 - el.dockPaddingRight))
+    else
+        local finalW = el.relativeW and (cw * (el.wPercent or 1) / 100) or el.w
+        if finalW > cw then
+            if el.relativeW then el.wPercent = 100 else el.w = cw end
+        end
+    end
+    
+    if (el.dockY or "none") == "fill" then
+        el.dockPaddingBottom = math.max(0, el.dockPaddingBottom or 0)
+        el.y = clamp(el.y or 0, 0, math.max(0, ch - 20 - el.dockPaddingBottom))
+    else
+        local finalH = el.relativeH and (ch * (el.hPercent or 1) / 100) or el.h
+        if finalH > ch then
+            if el.relativeH then el.hPercent = 100 else el.h = ch end
+        end
+    end
+    
+    if el.radius then
+        local nw = el.relativeW and (cw * (el.wPercent or 0) / 100) or el.w
+        local nh = el.relativeH and (ch * (el.hPercent or 0) / 100) or el.h
+        if el.dockX == "fill" then nw = cw - (el.x or 0) - (el.dockPaddingRight or 0) end
+        if el.dockY == "fill" then nh = ch - (el.y or 0) - (el.dockPaddingBottom or 0) end
+        el.radius = clamp(el.radius, 0, math.floor(math.min(nw, nh) / 2))
+    end
 end
 
 local _animValues = {}
@@ -240,7 +384,7 @@ end
 local _uiRoundedCache = {}
 local _uiSvgPendingFrames = 0
 
-local function dxDrawUiRounded(cacheKey, x, y, w, h, radius, color, postGUI)
+function dxDrawUiRounded(cacheKey, x, y, w, h, radius, color, postGUI)
     w      = math.max(1, round(w))
     h      = math.max(1, round(h))
     radius = clamp(round(radius or 0), 0, math.floor(math.min(w, h) / 2))
@@ -265,13 +409,39 @@ local PROPERTY_DEFS = {
     common = {
         {kind="group", label="Kimlik"},
         {key="label",  label="Ad",      kind="rename"},
+        {key="parentId", label="Parent", kind="text"},
+        {key="groupId",  label="Grup",   kind="text"},
+        {key="componentId", label="Bileşen ID",   kind="text"},
+        {key="componentInstanceOf", label="Bileşen Kaynağı",   kind="text"},
+        {key="componentDetached", label="Ayrılmış",   kind="boolean"},
         {kind="group", label="Konum ve Boyut"},
         {key="x",      label="X",       kind="number"},
         {key="y",      label="Y",       kind="number"},
         {key="w",      label="Genişlik",kind="number"},
         {key="h",      label="Yükseklik",kind="number"},
+        {key="anchorX",label="Anchor X", kind="enum", options=ANCHOR_X_OPTIONS},
+        {key="anchorY",label="Anchor Y", kind="enum", options=ANCHOR_Y_OPTIONS},
+        {key="dockX",  label="Dock X",   kind="enum", options=DOCK_OPTIONS},
+        {key="dockY",  label="Dock Y",   kind="enum", options=DOCK_OPTIONS},
+        {key="dockPaddingRight", label="Sag Bosluk", kind="number"},
+        {key="dockPaddingBottom",label="Alt Bosluk", kind="number"},
+        {key="relativeW", label="Genislik %", kind="boolean"},
+        {key="relativeH", label="Yukseklik %", kind="boolean"},
+        {key="wPercent", label="Genislik Yuzde", kind="number"},
+        {key="hPercent", label="Yukseklik Yuzde", kind="number"},
         {kind="group", label="Durum"},
         {key="locked", label="Kilitli", kind="boolean"},
+        {key="visible",label="Gorunur", kind="boolean"},
+        {kind="group", label="Etkilesim"},
+        {key="clickAction", label="Tik Aksiyonu", kind="enum", options=ACTION_TYPE_OPTIONS},
+        {key="actionTarget", label="Hedef ID", kind="text"},
+        {key="actionValue", label="Deger", kind="text"},
+        {kind="group", label="Animasyon"},
+        {key="animationType", label="Animasyon", kind="enum", options=ANIMATION_TYPE_OPTIONS},
+        {key="animationTrigger", label="Tetik", kind="enum", options=ANIMATION_TRIGGER_OPTIONS},
+        {key="animationDuration", label="Sure(ms)", kind="number"},
+        {key="animationLoop", label="Dongu", kind="boolean"},
+        {key="animationIntensity", label="Etki", kind="number"},
     },
     window = {
         {kind="group", label="İçerik"},
@@ -343,6 +513,60 @@ local PROPERTY_DEFS = {
         {key="color",     label="Ton",     kind="color"},
         {key="radius",    label="Yarıçap", kind="number"},
     },
+    container = {
+        {kind="group", label="Kapsayici"},
+        {key="color",  label="Renk",    kind="color"},
+        {key="radius", label="Yaricap", kind="number"},
+    },
+    progressbar = {
+        {kind="group", label="Doluluk"},
+        {key="progress",      label="Yuzde",     kind="number"},
+        {key="text",          label="Yazi",      kind="text"},
+        {key="color",         label="Arka Plan", kind="color"},
+        {key="progressColor", label="Dolgu",     kind="color"},
+        {key="textColor",     label="Yazi Renk", kind="color"},
+        {key="radius",        label="Yaricap",   kind="number"},
+    },
+    checkbox = {
+        {kind="group", label="Checkbox"},
+        {key="checked",    label="Secili",    kind="boolean"},
+        {key="text",       label="Yazi",      kind="text"},
+        {key="boxColor",   label="Kutu",      kind="color"},
+        {key="checkColor", label="Tik",       kind="color"},
+        {key="textColor",  label="Yazi Renk", kind="color"},
+        {key="fontScale",  label="Boyut",     kind="number"},
+        {key="font",       label="Font",      kind="enum", options=FONT_OPTIONS},
+    },
+    editbox = {
+        {kind="group", label="EditBox"},
+        {key="text",        label="Metin",       kind="text"},
+        {key="placeholder", label="Placeholder", kind="text"},
+        {key="color",       label="Arka Plan",   kind="color"},
+        {key="borderColor", label="Cerceve",     kind="color"},
+        {key="textColor",   label="Yazi",        kind="color"},
+        {key="fontScale",   label="Boyut",       kind="number"},
+        {key="font",        label="Font",        kind="enum", options=FONT_OPTIONS},
+        {key="radius",      label="Yaricap",     kind="number"},
+        {key="masked",      label="Sifre",       kind="boolean"},
+    },
+    line = {
+        {kind="group", label="Cizgi"},
+        {key="color",     label="Renk",      kind="color"},
+        {key="thickness", label="Kalinlik",  kind="number"},
+    },
+    gradient = {
+        {kind="group", label="Gradient"},
+        {key="color",         label="Baslangic", kind="color"},
+        {key="gradientColor", label="Bitis",     kind="color"},
+        {key="gradientMode",  label="Yon",       kind="enum", options={"horizontal","vertical"}},
+        {key="radius",        label="Yaricap",   kind="number"},
+    },
+    icon = {
+        {kind="group", label="Ikon"},
+        {key="iconName", label="Ikon",  kind="enum", options={"window","button","label","rectangle","image","circle","save","load","code","copy","trash","layers","front","back","duplicate","clear","lock","eye_on","eye_off"}},
+        {key="color",    label="Renk",  kind="color"},
+        {key="iconSize", label="Boyut", kind="number"},
+    },
     circle = {
         {kind="group", label="Görünüm"},
         {key="color",       label="Renk",         kind="color"},
@@ -351,31 +575,39 @@ local PROPERTY_DEFS = {
     },
 }
 
+local DEFAULT_STYLE_PRESETS = {
+    {name="Primary Button", type="button", values={color={63,124,255,235}, hoverColor={92,150,255,245}, textColor={255,255,255,255}, radius=16, font="gilroy-semibold", fontScale=1}},
+    {name="Danger Button", type="button", values={color={220,78,78,235}, hoverColor={240,98,98,245}, textColor={255,255,255,255}, radius=16}},
+    {name="Panel Soft", type="rectangle", values={color={27,31,42,230}, radius=18}},
+    {name="Panel Accent", type="window", values={headerColor={63,124,255,245}, bodyColor={18,22,30,235}, textColor={255,255,255,255}}},
+    {name="Success Bar", type="progressbar", values={color={32,37,49,220}, progressColor={72,199,130,255}, radius=12, progress=68}},
+}
+
 local function rgba(color)
     return tocolor(color[1], color[2], color[3], color[4] or 255)
 end
 
-local function snapToGrid(value, gridSize)
+function snapToGrid(value, gridSize)
     if not editor.snapEnabled or not gridSize or gridSize <= 0 then return value end
     return round(value / gridSize) * gridSize
 end
 
-local function insideRect(x, y, rx, ry, rw, rh)
+function insideRect(x, y, rx, ry, rw, rh)
     return x >= rx and x <= rx + rw and y >= ry and y <= ry + rh
 end
 
-local function escapeLuaString(value)
+function escapeLuaString(value)
     value = tostring(value or "")
     value = value:gsub("\\","\\\\"):gsub("\r",""):gsub("\n","\\n"):gsub("\"","\\\"")
     return value
 end
 
-local function trim(value)
+function trim(value)
     local str = tostring(value or ""):gsub("^%s+",""):gsub("%s+$","")
     return str
 end
 
-local function deleteLastCharacter(value)
+function deleteLastCharacter(value)
     if utf8 and utf8.len then
         local length = utf8.len(value)
         if not length or length <= 0 then return "" end
@@ -384,7 +616,7 @@ local function deleteLastCharacter(value)
     return string.sub(value, 1, math.max(#value - 1, 0))
 end
 
-local function utfLen(s)
+function utfLen(s)
     if utf8 and utf8.len then
         local l = utf8.len(s)
         return l or #s
@@ -392,35 +624,35 @@ local function utfLen(s)
     return #s
 end
 
-local function utfSub(s, i, j)
+function utfSub(s, i, j)
     if utf8 and utf8.sub then return utf8.sub(s, i, j) end
     return string.sub(s, i, j)
 end
 
-local function inputGetCursor(input)
+function inputGetCursor(input)
     return input.cursor or utfLen(input.value)
 end
 
-local function inputGetSelStart(input)
+function inputGetSelStart(input)
     return input.selStart
 end
 
-local function inputGetSelEnd(input)
+function inputGetSelEnd(input)
     return input.selEnd
 end
 
-local function inputHasSelection(input)
+function inputHasSelection(input)
     return input.selStart and input.selEnd and input.selStart ~= input.selEnd
 end
 
-local function inputGetSelectedRange(input)
+function inputGetSelectedRange(input)
     if not inputHasSelection(input) then return nil, nil end
     local a, b = input.selStart, input.selEnd
     if a > b then a, b = b, a end
     return a, b
 end
 
-local function inputDeleteSelection(input)
+function inputDeleteSelection(input)
     local a, b = inputGetSelectedRange(input)
     if not a then return false end
     local text = input.value
@@ -433,25 +665,25 @@ local function inputDeleteSelection(input)
     return true
 end
 
-local function inputSetCursor(input, pos)
+function inputSetCursor(input, pos)
     local len = utfLen(input.value)
     input.cursor = clamp(pos, 0, len)
     editor.cursorBlink = getTickCount()
 end
 
-local function inputClearSelection(input)
+function inputClearSelection(input)
     input.selStart = nil
     input.selEnd = nil
 end
 
-local function inputSelectAll(input)
+function inputSelectAll(input)
     input.selStart = 0
     input.selEnd = utfLen(input.value)
     input.cursor = input.selEnd
     editor.cursorBlink = getTickCount()
 end
 
-local function inputMoveCursor(input, delta, keepSelection)
+function inputMoveCursor(input, delta, keepSelection)
     local oldCursor = inputGetCursor(input)
     local newCursor = clamp(oldCursor + delta, 0, utfLen(input.value))
     if keepSelection then
@@ -474,7 +706,7 @@ local function inputMoveCursor(input, delta, keepSelection)
     inputSetCursor(input, newCursor)
 end
 
-local function inputHome(input, keepSelection)
+function inputHome(input, keepSelection)
     local oldCursor = inputGetCursor(input)
     if keepSelection then
         if not input.selStart then input.selStart = oldCursor end
@@ -485,7 +717,7 @@ local function inputHome(input, keepSelection)
     inputSetCursor(input, 0)
 end
 
-local function inputEnd(input, keepSelection)
+function inputEnd(input, keepSelection)
     local oldCursor = inputGetCursor(input)
     local len = utfLen(input.value)
     if keepSelection then
@@ -497,7 +729,7 @@ local function inputEnd(input, keepSelection)
     inputSetCursor(input, len)
 end
 
-local function inputInsertText(input, text)
+function inputInsertText(input, text)
     inputDeleteSelection(input)
     local cursor = inputGetCursor(input)
     local before = cursor > 0 and utfSub(input.value, 1, cursor) or ""
@@ -506,7 +738,7 @@ local function inputInsertText(input, text)
     inputSetCursor(input, cursor + utfLen(text))
 end
 
-local function inputBackspace(input)
+function inputBackspace(input)
     if inputDeleteSelection(input) then return end
     local cursor = inputGetCursor(input)
     if cursor <= 0 then return end
@@ -516,7 +748,7 @@ local function inputBackspace(input)
     inputSetCursor(input, cursor - 1)
 end
 
-local function inputDelete(input)
+function inputDelete(input)
     if inputDeleteSelection(input) then return end
     local cursor = inputGetCursor(input)
     local len = utfLen(input.value)
@@ -526,7 +758,7 @@ local function inputDelete(input)
     input.value = before .. after
 end
 
-local function inputCopySelection(input)
+function inputCopySelection(input)
     if not inputHasSelection(input) then return "" end
     local a, b = inputGetSelectedRange(input)
     return utfSub(input.value, a + 1, b)
@@ -535,7 +767,7 @@ end
 local _frameCursorX, _frameCursorY = nil, nil
 local _frameScreenW, _frameScreenH = 0, 0
 
-local function refreshFrameCache()
+function refreshFrameCache()
     local sw, sh = guiGetScreenSize()
     _frameScreenW, _frameScreenH = sw, sh
     if isCursorShowing() then
@@ -549,22 +781,22 @@ local function refreshFrameCache()
     _frameCursorX, _frameCursorY = nil, nil
 end
 
-local function getScreenCursor()
+function getScreenCursor()
     return _frameCursorX, _frameCursorY
 end
 
-local function hasVisibleColor(color)
+function hasVisibleColor(color)
     return type(color) == "table" and (color[4] or 255) > 0
 end
 
-local function normalizeBoolean(value)
+function normalizeBoolean(value)
     local v = trim(value):lower()
     if v=="true" or v=="1" or v=="yes" or v=="on"  then return true  end
     if v=="false"or v=="0" or v=="no"  or v=="off" then return false end
     return nil
 end
 
-local function normalizeEnumValue(value, options)
+function normalizeEnumValue(value, options)
     local v = trim(value):lower()
     for _, opt in ipairs(options or {}) do
         if v == tostring(opt):lower() then return opt end
@@ -572,15 +804,15 @@ local function normalizeEnumValue(value, options)
     return nil
 end
 
-local function formatBoolean(value)
+function formatBoolean(value)
     return value and "true" or "false"
 end
 
-local function colorToString(color)
+function colorToString(color)
     return string.format("%d, %d, %d, %d", color[1], color[2], color[3], color[4] or 255)
 end
 
-local function parseColorString(value)
+function parseColorString(value)
     local hex = tostring(value):match("^#?(%x+)$")
     if hex then
         if #hex == 3 then
@@ -604,7 +836,7 @@ local function parseColorString(value)
     return numbers
 end
 
-local function destroyElementSvgCache(id)
+function destroyElementSvgCache(id)
     if roundedCache[id] then
         for _, widths in pairs(roundedCache[id]) do
             for _, heights in pairs(widths) do
@@ -623,14 +855,14 @@ local function destroyElementSvgCache(id)
     end
 end
 
-local function destroyRoundedCache()
+function destroyRoundedCache()
     for id in pairs(roundedCache) do destroyElementSvgCache(id) end
     for id in pairs(circleCache)  do destroyElementSvgCache(id) end
     roundedCache = {}
     circleCache  = {}
 end
 
-local function dxDrawRoundedRectangle(id, x, y, w, h, radius, color, postGUI)
+function dxDrawRoundedRectangle(id, x, y, w, h, radius, color, postGUI)
     w      = math.max(1, round(w))
     h      = math.max(1, round(h))
     radius = clamp(round(radius or 0), 0, math.floor(math.min(w, h) / 2))
@@ -652,7 +884,7 @@ local function dxDrawRoundedRectangle(id, x, y, w, h, radius, color, postGUI)
     end
 end
 
-local function dxDrawEllipse(id, x, y, w, h, color, postGUI)
+function dxDrawEllipse(id, x, y, w, h, color, postGUI)
     w = math.max(1, round(w))
     h = math.max(1, round(h))
     local key = w .. "_" .. h
@@ -669,10 +901,31 @@ local function dxDrawEllipse(id, x, y, w, h, color, postGUI)
     end
 end
 
+function dxDrawGradientRect(id, x, y, w, h, colorA, colorB, vertical)
+    local steps = vertical and math.max(8, round(h / 10)) or math.max(8, round(w / 10))
+    for i = 0, steps - 1 do
+        local t = i / math.max(1, steps - 1)
+        local c = {
+            lerp(colorA[1], colorB[1], t),
+            lerp(colorA[2], colorB[2], t),
+            lerp(colorA[3], colorB[3], t),
+            lerp(colorA[4] or 255, colorB[4] or 255, t),
+        }
+        local col = tocolor(c[1], c[2], c[3], c[4] or 255)
+        if vertical then
+            local sy = y + (h / steps) * i
+            dxDrawRectangle(x, sy, w, math.ceil(h / steps), col)
+        else
+            local sx = x + (w / steps) * i
+            dxDrawRectangle(sx, y, math.ceil(w / steps), h, col)
+        end
+    end
+end
+
 local _fetchingUrls = {}
 local _remoteTempCounter = 0
 
-local function getOrLoadTexture(path)
+function getOrLoadTexture(path)
     if not path or path == "" then return nil end
     if imageCache[path] then
         if isElement(imageCache[path]) then return imageCache[path] end
@@ -739,7 +992,7 @@ addEventHandler("dxui:receiveRemoteImage", localPlayer, function(url, responseDa
     end
 end)
 
-local function drawStyledText(text, left, top, right, bottom, options)
+function drawStyledText(text, left, top, right, bottom, options)
     options = options or {}
     local font        = resolveFont(options.font or "default-bold")
     local scale       = options.fontScale or 1
@@ -774,6 +1027,166 @@ local function buildPreviewTextOptions(element, scale)
     }
 end
 
+local function easeOutQuad(t)
+    t = clamp(t or 0, 0, 1)
+    return 1 - (1 - t) * (1 - t)
+end
+
+local function modulateColorAlpha(color, alphaMultiplier)
+    if type(color) ~= "table" then return color end
+    return {
+        color[1] or 255,
+        color[2] or 255,
+        color[3] or 255,
+        clamp(round((color[4] or 255) * (alphaMultiplier or 1)), 0, 255),
+    }
+end
+
+local function getElementAnimationProgress(element, hovered)
+    local animType = element.animationType or "none"
+    if animType == "none" then
+        return nil, false
+    end
+
+    local trigger = element.animationTrigger or "auto"
+    local duration = clamp(tonumber(element.animationDuration) or 1200, 120, 10000)
+    local now = getTickCount()
+    editor.runtimeStartTick = editor.runtimeStartTick or now
+    editor.animationClickTicks = editor.animationClickTicks or {}
+
+    if trigger == "hover" then
+        local blend = animLerp("hover_anim_" .. element.id, hovered and 1 or 0, 12)
+        return clamp(blend, 0, 1), false
+    end
+
+    if trigger == "click" then
+        local started = editor.animationClickTicks[element.id]
+        if not started then
+            return 0, false
+        end
+        local t = clamp((now - started) / duration, 0, 1)
+        if t >= 1 then
+            editor.animationClickTicks[element.id] = nil
+        end
+        return t, t < 1
+    end
+
+    local elapsed = now - editor.runtimeStartTick
+    if element.animationLoop then
+        local phase = (elapsed % duration) / duration
+        return phase, true
+    end
+
+    return clamp(elapsed / duration, 0, 1), elapsed < duration
+end
+
+local function getElementAnimatedRect(element, x, y, w, h, hovered)
+    local animType = element.animationType or "none"
+    if animType == "none" then
+        return x, y, w, h, 1
+    end
+
+    local progress, looped = getElementAnimationProgress(element, hovered)
+    if not progress then
+        return x, y, w, h, 1
+    end
+
+    local intensity = clamp(tonumber(element.animationIntensity) or 18, 0, 100)
+    local scale = 1
+    local alpha = 1
+    local offsetX = 0
+    local offsetY = 0
+    local wave = looped and (0.5 - 0.5 * math.cos(progress * math.pi * 2)) or math.sin(progress * math.pi)
+    local eased = easeOutQuad(progress)
+
+    if animType == "fade" then
+        alpha = looped and (0.35 + wave * 0.65) or math.max(0.05, eased)
+    elseif animType == "pulse" then
+        scale = 1 + (intensity / 100) * (looped and wave or math.max(0, wave))
+    elseif animType == "float" then
+        local amp = (intensity / 100) * math.max(w, h) * 0.25
+        offsetY = looped and (math.sin(progress * math.pi * 2) * amp) or (-wave * amp)
+    elseif animType == "slide-left" then
+        offsetX = looped and (-math.sin(progress * math.pi * 2) * intensity) or (-(1 - eased) * intensity)
+    elseif animType == "slide-right" then
+        offsetX = looped and (math.sin(progress * math.pi * 2) * intensity) or ((1 - eased) * intensity)
+    elseif animType == "slide-up" then
+        offsetY = looped and (-math.sin(progress * math.pi * 2) * intensity) or (-(1 - eased) * intensity)
+    elseif animType == "slide-down" then
+        offsetY = looped and (math.sin(progress * math.pi * 2) * intensity) or ((1 - eased) * intensity)
+    elseif animType == "zoom" then
+        local fromScale = 1 - intensity / 120
+        scale = looped and (1 + (wave - 0.5) * (intensity / 100)) or lerp(fromScale, 1, eased)
+    end
+
+    local drawW = math.max(1, w * scale)
+    local drawH = math.max(1, h * scale)
+    local drawX = x - (drawW - w) / 2 + offsetX
+    local drawY = y - (drawH - h) / 2 + offsetY
+    return drawX, drawY, drawW, drawH, alpha
+end
+
+local function triggerElementAnimation(elementId)
+    editor.animationClickTicks = editor.animationClickTicks or {}
+    editor.animationClickTicks[elementId] = getTickCount()
+end
+
+local function executeElementAction(element)
+    if not element then return false end
+
+    local action = element.clickAction or "none"
+    if action == "none" then return false end
+
+    local targetId = trim(element.actionTarget or "")
+    local target = targetId ~= "" and getElementById(targetId) or element
+
+    if action == "toggle_visibility" then
+        if target then
+            target.visible = not (target.visible ~= false)
+            markDirty()
+            return true
+        end
+    elseif action == "show" then
+        if target then
+            target.visible = true
+            markDirty()
+            return true
+        end
+    elseif action == "hide" then
+        if target then
+            target.visible = false
+            markDirty()
+            return true
+        end
+    elseif action == "toggle_checkbox" then
+        if target and target.type == "checkbox" then
+            target.checked = not not (not target.checked)
+            markDirty()
+            return true
+        end
+    elseif action == "play_animation" then
+        if target then
+            triggerElementAnimation(target.id)
+            return true
+        end
+    elseif action == "chat_message" then
+        local msg = trim(element.actionValue or "")
+        if msg ~= "" then
+            outputChatBox("[DX UI Creator] " .. msg, 75, 144, 255, true)
+            return true
+        end
+    elseif action == "trigger_event" then
+        local evt = trim(element.actionValue or "")
+        if evt ~= "" then
+            triggerEvent("dxui:onElementClick", localPlayer, evt, element.id, targetId)
+            outputChatBox("[DX UI Creator] Event tetiklendi: " .. evt, 115, 191, 136, true)
+            return true
+        end
+    end
+
+    return false
+end
+
 local function deepCopyElement(element)
     local clone = {}
     for key, value in pairs(element) do
@@ -793,12 +1206,125 @@ local function deepCopyElements(elements)
     return copy
 end
 
+local function normalizeSelection()
+    editor.selectedIds = editor.selectedIds or {}
+    if editor.selectedId then
+        editor.selectedIds[editor.selectedId] = true
+    end
+end
+
+local function clearSelection()
+    editor.selectedId = nil
+    editor.selectedIds = {}
+end
+
+local function isElementSelected(id)
+    return editor.selectedIds and editor.selectedIds[id] == true
+end
+
+local function getSelectedElements()
+    local list = {}
+    normalizeSelection()
+    for _, el in ipairs(editor.elements) do
+        if isElementSelected(el.id) then
+            list[#list+1] = el
+        end
+    end
+    if #list == 0 and editor.selectedId then
+        for _, el in ipairs(editor.elements) do
+            if el.id == editor.selectedId then
+                list[1] = el
+                break
+            end
+        end
+    end
+    return list
+end
+
+local function setSelection(ids, primaryId)
+    editor.selectedIds = {}
+    if type(ids) == "table" then
+        for _, id in ipairs(ids) do
+            if id then editor.selectedIds[id] = true end
+        end
+    elseif ids then
+        editor.selectedIds[ids] = true
+    end
+    editor.selectedId = type(ids) == "table" and primaryId or (primaryId or ids)
+    if not editor.selectedId then
+        for id in pairs(editor.selectedIds) do editor.selectedId = id break end
+    end
+    if editor.activeInput and editor.activeInput.elementId ~= editor.selectedId then editor.activeInput = nil end
+    editor.colorPicker = nil
+    editor.inspectorScroll = 0
+    editor.panelDirty = true
+end
+
+local function addToSelection(id, makePrimary)
+    normalizeSelection()
+    editor.selectedIds[id] = true
+    if makePrimary or not editor.selectedId then
+        editor.selectedId = id
+    end
+    editor.panelDirty = true
+end
+
+local function removeFromSelection(id)
+    if not editor.selectedIds then return end
+    editor.selectedIds[id] = nil
+    if editor.selectedId == id then
+        editor.selectedId = nil
+        for keepId in pairs(editor.selectedIds) do editor.selectedId = keepId break end
+    end
+    editor.panelDirty = true
+end
+
+local function getElementById(id)
+    for _, el in ipairs(editor.elements) do
+        if el.id == id then return el end
+    end
+    return nil
+end
+
+local function getChildrenOf(parentId)
+    local list = {}
+    for _, el in ipairs(editor.elements) do
+        if el.parentId == parentId then
+            list[#list+1] = el
+        end
+    end
+    return list
+end
+
+local function collectDescendants(parentId, out)
+    out = out or {}
+    for _, child in ipairs(getChildrenOf(parentId)) do
+        if not out[child.id] then
+            out[child.id] = child
+            collectDescendants(child.id, out)
+        end
+    end
+    return out
+end
+
+local function moveElementWithChildren(element, dx, dy, moved)
+    moved = moved or {}
+    if moved[element.id] then return end
+    moved[element.id] = true
+    local x, y = getElementCanvasRect(element)
+    setElementCanvasPosition(element, x + dx, y + dy)
+    for _, child in ipairs(getChildrenOf(element.id)) do
+        moveElementWithChildren(child, dx, dy, moved)
+    end
+end
+
 local function markDirty() editor.exportDirty = true; editor.panelDirty = true end
 
 local function saveUndoState()
     undoStack[#undoStack+1] = {
         elements   = deepCopyElements(editor.elements),
         selectedId = editor.selectedId,
+        selectedIds= deepCopyElement(editor.selectedIds or {}),
         nextId     = editor.nextId,
     }
     if #undoStack > MAX_UNDO then table.remove(undoStack, 1) end
@@ -813,6 +1339,7 @@ local function applyState(state)
     end
     editor.elements   = deepCopyElements(state.elements)
     editor.selectedId = state.selectedId
+    editor.selectedIds= deepCopyElement(state.selectedIds or {})
     editor.nextId     = state.nextId
     editor.activeInput  = nil
     editor.interaction  = nil
@@ -822,7 +1349,7 @@ end
 
 local function undo()
     if #undoStack == 0 then outputChatBox("[DX UI Creator] Geri alınacak işlem yok.", 230,164,52,true); return end
-    redoStack[#redoStack+1] = {elements=deepCopyElements(editor.elements), selectedId=editor.selectedId, nextId=editor.nextId}
+    redoStack[#redoStack+1] = {elements=deepCopyElements(editor.elements), selectedId=editor.selectedId, selectedIds=deepCopyElement(editor.selectedIds or {}), nextId=editor.nextId}
     local state = undoStack[#undoStack]; table.remove(undoStack, #undoStack)
     applyState(state)
     outputChatBox("[DX UI Creator] Geri alındı. ("..#undoStack.." adım kaldı)", 75,144,255,true)
@@ -830,7 +1357,7 @@ end
 
 local function redo()
     if #redoStack == 0 then outputChatBox("[DX UI Creator] İleri alınacak işlem yok.", 230,164,52,true); return end
-    undoStack[#undoStack+1] = {elements=deepCopyElements(editor.elements), selectedId=editor.selectedId, nextId=editor.nextId}
+    undoStack[#undoStack+1] = {elements=deepCopyElements(editor.elements), selectedId=editor.selectedId, selectedIds=deepCopyElement(editor.selectedIds or {}), nextId=editor.nextId}
     local state = redoStack[#redoStack]; table.remove(redoStack, #redoStack)
     applyState(state)
     outputChatBox("[DX UI Creator] İleri alındı.", 75,144,255,true)
@@ -887,6 +1414,8 @@ end
 local function setSelectedElement(id)
     if editor.selectedId ~= id then editor.inspectorScroll = 0; editor.panelDirty = true end
     editor.selectedId = id
+    editor.selectedIds = {}
+    if id then editor.selectedIds[id] = true end
     if editor.activeInput and editor.activeInput.elementId ~= id then editor.activeInput = nil end
     editor.colorPicker = nil
 end
@@ -897,11 +1426,17 @@ local function createDefaultElement(typeName)
     local el = {
         id=id, type=typeName,
         x=120, y=100, w=240, h=80,
+        anchorX="left", anchorY="top",
+        dockX="none", dockY="none", dockPaddingRight=0, dockPaddingBottom=0,
+        relativeW=false, relativeH=false, wPercent=0, hPercent=0,
         fontScale=1, font="default-bold",
         alignX="left", alignY="center",
         clip=false, wordBreak=false, colorCoded=false,
         visible=true, shadowColor={0,0,0,0}, shadowOffsetX=1, shadowOffsetY=1,
-        radius=0, locked=false,
+        radius=0, locked=false, parentId="", groupId="",
+        componentId="", componentInstanceOf="", componentDetached=false,
+        clickAction="none", actionTarget="", actionValue="",
+        animationType="none", animationTrigger="auto", animationDuration=1200, animationLoop=false, animationIntensity=18,
     }
     if typeName == "window" then
         el.w=360; el.h=240; el.title="Yeni Pencere"; el.fontScale=1.05
@@ -919,6 +1454,20 @@ local function createDefaultElement(typeName)
         el.textColor={255,255,255,255}; el.shadowColor={0,0,0,190}
     elseif typeName == "image" then
         el.w=240; el.h=160; el.imagePath=""; el.color={255,255,255,255}; el.radius=0
+    elseif typeName == "container" then
+        el.w=320; el.h=220; el.color={35,40,52,120}; el.radius=18
+    elseif typeName == "progressbar" then
+        el.w=260; el.h=28; el.progress=60; el.color={27,31,42,220}; el.progressColor={72,199,130,255}; el.text="60%"; el.textColor={255,255,255,255}; el.radius=12; el.alignX="center"
+    elseif typeName == "checkbox" then
+        el.w=220; el.h=28; el.checked=true; el.text="Checkbox"; el.boxColor={27,31,42,230}; el.checkColor={72,199,130,255}; el.textColor={255,255,255,255}; el.font="gilroy-medium"
+    elseif typeName == "editbox" then
+        el.w=260; el.h=42; el.text=""; el.placeholder="Bir sey yaz..."; el.color={20,24,32,235}; el.borderColor={63,124,255,150}; el.textColor={255,255,255,255}; el.font="gilroy-medium"; el.radius=12; el.masked=false
+    elseif typeName == "line" then
+        el.w=220; el.h=2; el.color={255,255,255,180}; el.thickness=2
+    elseif typeName == "gradient" then
+        el.w=260; el.h=100; el.color={63,124,255,240}; el.gradientColor={148,83,255,240}; el.gradientMode="horizontal"; el.radius=18
+    elseif typeName == "icon" then
+        el.w=42; el.h=42; el.color={255,255,255,255}; el.iconName="save"; el.iconSize=24
     elseif typeName == "circle" then
         el.w=120; el.h=120; el.color={97,178,111,230}
         el.borderColor={255,255,255,0}; el.borderWidth=0
@@ -934,6 +1483,223 @@ local function addElement(typeName)
     el.y = clamp(round((editor.canvas.height - el.h) / 2) + offset, 0, editor.canvas.height - el.h)
     table.insert(editor.elements, el)
     setSelectedElement(el.id)
+    updateAssetLibrary()
+    markDirty()
+end
+
+function updateAssetLibrary()
+    local seen = {}
+    editor.assetLibrary = {}
+    for _, el in ipairs(editor.elements) do
+        if el.type == "image" and el.imagePath and el.imagePath ~= "" and not seen[el.imagePath] then
+            seen[el.imagePath] = true
+            editor.assetLibrary[#editor.assetLibrary+1] = el.imagePath
+        end
+    end
+end
+
+local function ensureStylePresets()
+    if #editor.stylePresets == 0 then
+        for _, preset in ipairs(DEFAULT_STYLE_PRESETS) do
+            editor.stylePresets[#editor.stylePresets+1] = deepCopyElement(preset)
+        end
+    end
+end
+
+local function getSelectionBounds()
+    local selected = getSelectedElements()
+    if #selected == 0 then return nil end
+    local minX, minY, maxX, maxY
+    for _, el in ipairs(selected) do
+        local x, y, w, h = getElementCanvasRect(el)
+        minX = minX and math.min(minX, x) or x
+        minY = minY and math.min(minY, y) or y
+        maxX = maxX and math.max(maxX, x + w) or (x + w)
+        maxY = maxY and math.max(maxY, y + h) or (y + h)
+    end
+    return minX, minY, maxX, maxY
+end
+
+local function distributeSelection(axis)
+    local selected = getSelectedElements()
+    if #selected < 3 then return end
+    saveUndoState()
+    table.sort(selected, function(a, b)
+        local ax, ay = getElementCanvasRect(a)
+        local bx, by = getElementCanvasRect(b)
+        return axis == "x" and ax < bx or ay < by
+    end)
+    local first, last = selected[1], selected[#selected]
+    local firstX, firstY, firstW, firstH = getElementCanvasRect(first)
+    local lastX, lastY, lastW, lastH = getElementCanvasRect(last)
+    local startPos = axis == "x" and firstX or firstY
+    local endPos = axis == "x" and (lastX + lastW) or (lastY + lastH)
+    local totalSize = 0
+    for _, el in ipairs(selected) do
+        totalSize = totalSize + (axis == "x" and el.w or el.h)
+    end
+    local gap = (endPos - startPos - totalSize) / math.max(1, (#selected - 1))
+    local cursor = startPos
+    for _, el in ipairs(selected) do
+        local x, y = getElementCanvasRect(el)
+        if axis == "x" then
+            setElementCanvasPosition(el, cursor, y)
+            cursor = cursor + el.w + gap
+        else
+            setElementCanvasPosition(el, x, cursor)
+            cursor = cursor + el.h + gap
+        end
+    end
+    markDirty()
+end
+
+local function applySameSize(axis)
+    local selected = getSelectedElements()
+    local primary = getSelectedElement()
+    if #selected < 2 or not primary then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        if el.id ~= primary.id then
+            if axis == "w" then el.w = primary.w else el.h = primary.h end
+        end
+    end
+    markDirty()
+end
+
+local function groupSelection()
+    local selected = getSelectedElements()
+    if #selected < 2 then return end
+    saveUndoState()
+    local groupId = "group_" .. tostring(editor.nextId)
+    for _, el in ipairs(selected) do
+        el.groupId = groupId
+    end
+    markDirty()
+end
+
+local function ungroupSelection()
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        el.groupId = ""
+    end
+    markDirty()
+end
+
+local function parentSelectionToPrimary()
+    local primary = getSelectedElement()
+    local selected = getSelectedElements()
+    if not primary or #selected < 2 then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        if el.id ~= primary.id then
+            el.parentId = primary.id
+        end
+    end
+    markDirty()
+end
+
+local function clearParentFromSelection()
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        el.parentId = ""
+    end
+    markDirty()
+end
+
+local function copySelectedStyle()
+    local sel = getSelectedElement()
+    if not sel then return end
+    local style = {}
+    for key, value in pairs(sel) do
+        if key ~= "id" and key ~= "type" and key ~= "x" and key ~= "y" and key ~= "w" and key ~= "h"
+            and key ~= "parentId" and key ~= "groupId" and key ~= "locked" and key ~= "visible" then
+            style[key] = type(value) == "table" and deepCopyElement(value) or value
+        end
+    end
+    editor.clipboardStyle = {type = sel.type, values = style}
+    outputChatBox("[DX UI Creator] Stil kopyalandi.", 75,144,255,true)
+end
+
+local function pasteSelectedStyle()
+    if not editor.clipboardStyle then return end
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        for key, value in pairs(editor.clipboardStyle.values) do
+            el[key] = type(value) == "table" and deepCopyElement(value) or value
+        end
+    end
+    markDirty()
+end
+
+local function applyStylePreset(index)
+    local preset = editor.stylePresets[index]
+    local selected = getSelectedElements()
+    if not preset or #selected == 0 then return end
+    saveUndoState()
+    for _, el in ipairs(selected) do
+        if not preset.type or el.type == preset.type then
+            for key, value in pairs(preset.values) do
+                el[key] = type(value) == "table" and deepCopyElement(value) or value
+            end
+        end
+    end
+    markDirty()
+end
+
+local function savePrefabFromSelection()
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    local minX, minY = getSelectionBounds()
+    local items = {}
+    for _, el in ipairs(selected) do
+        local clone = deepCopyElement(el)
+        local x, y = getElementCanvasRect(el)
+        clone.anchorX = "left"
+        clone.anchorY = "top"
+        clone.x = x - minX
+        clone.y = y - minY
+        items[#items+1] = clone
+    end
+    editor.prefabList[#editor.prefabList+1] = {
+        name = "prefab_" .. tostring(#editor.prefabList + 1),
+        items = items,
+    }
+    outputChatBox("[DX UI Creator] Prefab kaydedildi.", 115,191,136,true)
+end
+
+local function spawnPrefab(index)
+    local prefab = editor.prefabList[index]
+    if not prefab then return end
+    saveUndoState()
+    local created = {}
+    local idMap = {}
+    local clones = {}
+    for _, item in ipairs(prefab.items) do
+        local clone = deepCopyElement(item)
+        local newId = string.format("%s_%d", clone.type, editor.nextId)
+        idMap[clone.id] = newId
+        clone.id = newId
+        editor.nextId = editor.nextId + 1
+        clone.x = clone.x + 80
+        clone.y = clone.y + 80
+        created[#created+1] = clone.id
+        clones[#clones+1] = clone
+        table.insert(editor.elements, clone)
+    end
+    for _, el in ipairs(clones) do
+        if idMap[el.parentId] then el.parentId = idMap[el.parentId] end
+        if el.groupId and el.groupId ~= "" then
+            el.groupId = el.groupId .. "_" .. tostring(editor.nextId)
+        end
+    end
+    setSelection(created, created[#created])
+    updateAssetLibrary()
     markDirty()
 end
 
@@ -961,68 +1727,186 @@ local function moveSelectedLayer(direction)
 end
 
 local function duplicateSelected()
-    local sel = getSelectedElement()
-    if not sel or sel.locked then return end
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
     saveUndoState()
-    local clone = deepCopyElement(sel)
-    clone.id = string.format("%s_%d", clone.type, editor.nextId)
-    editor.nextId = editor.nextId + 1
-    clone.x = clamp(clone.x + 20, 0, editor.canvas.width  - clone.w)
-    clone.y = clamp(clone.y + 20, 0, editor.canvas.height - clone.h)
-    clone.locked = false
-    table.insert(editor.elements, clone)
-    setSelectedElement(clone.id)
+    local created = {}
+    local idMap = {}
+    local clones = {}
+    for _, sel in ipairs(selected) do
+        if not sel.locked then
+            local clone = deepCopyElement(sel)
+            local oldId = clone.id
+            clone.id = string.format("%s_%d", clone.type, editor.nextId)
+            idMap[oldId] = clone.id
+            editor.nextId = editor.nextId + 1
+            clone.x = clamp(clone.x + 20, 0, editor.canvas.width  - clone.w)
+            clone.y = clamp(clone.y + 20, 0, editor.canvas.height - clone.h)
+            clone.locked = false
+            table.insert(editor.elements, clone)
+            clones[#clones+1] = clone
+            created[#created+1] = clone.id
+        end
+    end
+    for _, clone in ipairs(clones) do
+        if clone.parentId and idMap[clone.parentId] then
+            clone.parentId = idMap[clone.parentId]
+        end
+        if clone.groupId and clone.groupId ~= "" then
+            clone.groupId = clone.groupId .. "_" .. tostring(editor.nextId)
+        end
+    end
+    if #created > 0 then
+        setSelection(created, created[#created])
+    end
     markDirty()
 end
 
-local function deleteSelected()
-    local i = getElementIndexById(editor.selectedId)
-    if not i then return end
-    local el = editor.elements[i]
-    if el.locked then outputChatBox("[DX UI Creator] Eleman kilitli, once kilidi kaldir.", 230,164,52,true); return end
+local function copySelectedElements()
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    local minX, minY = nil, nil
+    for _, el in ipairs(selected) do
+        local x, y = getElementCanvasRect(el)
+        minX = minX and math.min(minX, x) or x
+        minY = minY and math.min(minY, y) or y
+    end
+    local copies = {}
+    for _, el in ipairs(selected) do
+        local clone = deepCopyElement(el)
+        local x, y = getElementCanvasRect(el)
+        clone._origId = clone.id
+        clone.anchorX = "left"
+        clone.anchorY = "top"
+        clone.x = x - minX
+        clone.y = y - minY
+        copies[#copies+1] = clone
+    end
+    editor.clipboardElements = copies
+    outputChatBox("[DX UI Creator] " .. #copies .. " eleman kopyalandi. (Ctrl+V ile yapistir)", 75,144,255,true)
+end
+
+local function pasteClipboardElements()
+    if not editor.clipboardElements or #editor.clipboardElements == 0 then
+        outputChatBox("[DX UI Creator] Pano bos. Once Ctrl+C ile kopyala.", 230,164,52,true)
+        return
+    end
     saveUndoState()
-    destroyElementSvgCache(el.id)
-    table.remove(editor.elements, i)
-    setSelectedElement(nil)
+    local created = {}
+    local idMap = {}
+    local clones = {}
+    local centerX = round(editor.canvas.width / 2)
+    local centerY = round(editor.canvas.height / 2)
+    local totalW, totalH = 0, 0
+    for _, item in ipairs(editor.clipboardElements) do
+        totalW = math.max(totalW, item.x + item.w)
+        totalH = math.max(totalH, item.y + item.h)
+    end
+    local offsetX = clamp(round(centerX - totalW / 2), 0, editor.canvas.width - 20)
+    local offsetY = clamp(round(centerY - totalH / 2), 0, editor.canvas.height - 20)
+    for _, item in ipairs(editor.clipboardElements) do
+        local clone = deepCopyElement(item)
+        local newId = string.format("%s_%d", clone.type, editor.nextId)
+        idMap[clone._origId or clone.id] = newId
+        clone._origId = nil
+        clone.id = newId
+        editor.nextId = editor.nextId + 1
+        clone.x = clamp(clone.x + offsetX, 0, editor.canvas.width - clone.w)
+        clone.y = clamp(clone.y + offsetY, 0, editor.canvas.height - clone.h)
+        clone.locked = false
+        created[#created+1] = clone.id
+        clones[#clones+1] = clone
+        table.insert(editor.elements, clone)
+    end
+    for _, el in ipairs(clones) do
+        if el.parentId and idMap[el.parentId] then el.parentId = idMap[el.parentId] end
+        if el.groupId and el.groupId ~= "" then
+            el.groupId = el.groupId .. "_" .. tostring(editor.nextId)
+        end
+    end
+    if #created > 0 then
+        setSelection(created, created[#created])
+    end
+    updateAssetLibrary()
+    markDirty()
+    outputChatBox("[DX UI Creator] " .. #created .. " eleman yapistirildi.", 115,191,136,true)
+end
+
+local function deleteSelected()
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
+    saveUndoState()
+    local deleteMap = {}
+    for _, el in ipairs(selected) do
+        if el.locked then
+            outputChatBox("[DX UI Creator] Kilitli elemanlar silinmedi.", 230,164,52,true)
+        else
+            deleteMap[el.id] = true
+            local descendants = collectDescendants(el.id)
+            for id in pairs(descendants) do deleteMap[id] = true end
+        end
+    end
+    for i = #editor.elements, 1, -1 do
+        local el = editor.elements[i]
+        if deleteMap[el.id] then
+            destroyElementSvgCache(el.id)
+            table.remove(editor.elements, i)
+        end
+    end
+    clearSelection()
+    updateAssetLibrary()
     markDirty()
 end
 
 local function clearCanvas()
     saveUndoState()
     editor.elements = {}
-    editor.selectedId = nil
+    clearSelection()
     editor.activeInput = nil
     editor.interaction = nil
     editor.colorPicker = nil
     destroyRoundedCache()
+    updateAssetLibrary()
     markDirty()
 end
 
 local _lastArrowUndoTime = 0
 local function moveSelectedBy(ox, oy)
-    local el = getSelectedElement()
-    if not el or el.locked then return end
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
     local now = getTickCount()
     if now - _lastArrowUndoTime > 500 then
         saveUndoState()
         _lastArrowUndoTime = now
     end
-    el.x = clamp(el.x + ox, 0, editor.canvas.width  - el.w)
-    el.y = clamp(el.y + oy, 0, editor.canvas.height - el.h)
+    local moved = {}
+    for _, el in ipairs(selected) do
+        if not el.locked then
+            moveElementWithChildren(el, ox, oy, moved)
+        end
+    end
     markDirty()
 end
 
 local function alignSelected(mode)
-    local el = getSelectedElement()
-    if not el or el.locked then return end
+    local selected = getSelectedElements()
+    if #selected == 0 then return end
     saveUndoState()
     local cw, ch = editor.canvas.width, editor.canvas.height
-    if     mode == "left"    then el.x = 0
-    elseif mode == "centerX" then el.x = round((cw - el.w) / 2)
-    elseif mode == "right"   then el.x = cw - el.w
-    elseif mode == "top"     then el.y = 0
-    elseif mode == "centerY" then el.y = round((ch - el.h) / 2)
-    elseif mode == "bottom"  then el.y = ch - el.h
+    local minX, minY, maxX, maxY = getSelectionBounds()
+    local refX = (mode == "centerX" and round((cw - (maxX-minX)) / 2)) or (mode == "right" and (cw - (maxX-minX))) or 0
+    local refY = (mode == "centerY" and round((ch - (maxY-minY)) / 2)) or (mode == "bottom" and (ch - (maxY-minY))) or 0
+    for _, el in ipairs(selected) do
+        if not el.locked then
+            local x, y = getElementCanvasRect(el)
+            if     mode == "left"    then setElementCanvasPosition(el, x - minX, y)
+            elseif mode == "centerX" then setElementCanvasPosition(el, refX + (x - minX), y)
+            elseif mode == "right"   then setElementCanvasPosition(el, refX + (x - minX), y)
+            elseif mode == "top"     then setElementCanvasPosition(el, x, y - minY)
+            elseif mode == "centerY" then setElementCanvasPosition(el, x, refY + (y - minY))
+            elseif mode == "bottom"  then setElementCanvasPosition(el, x, refY + (y - minY))
+            end
+        end
     end
     markDirty()
 end
@@ -1031,7 +1915,7 @@ local function addHotbox(kind, x, y, w, h, data)
     editor.hotboxes[#editor.hotboxes+1] = {kind=kind, x=x, y=y, w=w, h=h, data=data}
 end
 
-local function drawOutline(x, y, w, h, color, thickness)
+function drawOutline(x, y, w, h, color, thickness)
     thickness = thickness or 1
     dxDrawRectangle(x, y, w, thickness, color)
     dxDrawRectangle(x, y+h-thickness, w, thickness, color)
@@ -1054,7 +1938,7 @@ local TOOLTIPS = {
     align_top="Yukarı hizala", align_centerY="Dikey ortala", align_bottom="Aşağı hizala",
 }
 
-local function drawTooltip()
+function drawTooltip()
     local cx, cy = getScreenCursor()
     if not cx then editor.tooltip = nil; return end
     local foundTip = nil
@@ -1155,6 +2039,7 @@ end
 
 local function cancelActiveInput()
     editor.activeInput = nil
+    editor.panelDirty = true
     return true
 end
 
@@ -1183,6 +2068,10 @@ local function commitActiveInput()
         end
         saveUndoState()
         destroyElementSvgCache(el.id)
+        if editor.selectedIds and editor.selectedIds[input.elementId] then
+            editor.selectedIds[input.elementId] = nil
+            editor.selectedIds[newId] = true
+        end
         el.id = newId
         if editor.selectedId == input.elementId then editor.selectedId = newId end
         editor.activeInput = nil
@@ -1208,28 +2097,98 @@ local function commitActiveInput()
         if not finalValue then outputChatBox("[DX UI Creator] Gecerli secenek gir.", 214,76,76,true); return false end
     end
 
+    local oldX, oldY, oldW, oldH = getElementCanvasRect(el)
     saveUndoState()
     el[input.key] = finalValue
 
-    if     input.key == "w"            then el.w            = clamp(el.w, 20, editor.canvas.width  - el.x)
-    elseif input.key == "h"            then el.h            = clamp(el.h, 20, editor.canvas.height - el.y)
-    elseif input.key == "x"            then el.x            = clamp(el.x, 0,  editor.canvas.width  - el.w)
-    elseif input.key == "y"            then el.y            = clamp(el.y, 0,  editor.canvas.height - el.h)
+    if     input.key == "w"            then
+        if el.relativeW then
+            el.wPercent = clamp((finalValue / editor.canvas.width) * 100, 1, 100)
+        end
+        if (el.dockX or "none") == "fill" then
+            el.dockPaddingRight = clamp(editor.canvas.width - oldX - finalValue, 0, editor.canvas.width)
+        end
+        el.w = clamp(el.w, 20, editor.canvas.width  - oldX)
+    elseif input.key == "h"            then
+        if el.relativeH then
+            el.hPercent = clamp((finalValue / editor.canvas.height) * 100, 1, 100)
+        end
+        if (el.dockY or "none") == "fill" then
+            el.dockPaddingBottom = clamp(editor.canvas.height - oldY - finalValue, 0, editor.canvas.height)
+        end
+        el.h = clamp(el.h, 20, editor.canvas.height - oldY)
+    elseif input.key == "x"            then
+        if (el.anchorX or "left") == "center" then
+            el.x = clamp(el.x, -math.floor((editor.canvas.width - el.w) / 2), math.floor((editor.canvas.width - el.w) / 2))
+        else
+            el.x = clamp(el.x, 0, editor.canvas.width - el.w)
+        end
+    elseif input.key == "y"            then
+        if (el.anchorY or "top") == "center" then
+            el.y = clamp(el.y, -math.floor((editor.canvas.height - el.h) / 2), math.floor((editor.canvas.height - el.h) / 2))
+        else
+            el.y = clamp(el.y, 0, editor.canvas.height - el.h)
+        end
+    elseif input.key == "anchorX" or input.key == "anchorY" then
+        setElementCanvasPosition(el, oldX, oldY)
+    elseif input.key == "dockX" then
+        if el.dockX == "fill" then
+            el.anchorX = "left"
+            el.x = oldX
+            el.dockPaddingRight = clamp(editor.canvas.width - oldX - oldW, 0, editor.canvas.width)
+        else
+            el.w = oldW
+            setElementCanvasPosition(el, oldX, oldY)
+        end
+    elseif input.key == "dockY" then
+        if el.dockY == "fill" then
+            el.anchorY = "top"
+            el.y = oldY
+            el.dockPaddingBottom = clamp(editor.canvas.height - oldY - oldH, 0, editor.canvas.height)
+        else
+            el.h = oldH
+            setElementCanvasPosition(el, oldX, oldY)
+        end
+    elseif input.key == "dockPaddingRight" then
+        el.dockPaddingRight = clamp(el.dockPaddingRight or 0, 0, editor.canvas.width)
+    elseif input.key == "dockPaddingBottom" then
+        el.dockPaddingBottom = clamp(el.dockPaddingBottom or 0, 0, editor.canvas.height)
+    elseif input.key == "relativeW" then
+        if el.relativeW then
+            el.wPercent = clamp((oldW / editor.canvas.width) * 100, 1, 100)
+        else
+            el.w = oldW
+        end
+    elseif input.key == "relativeH" then
+        if el.relativeH then
+            el.hPercent = clamp((oldH / editor.canvas.height) * 100, 1, 100)
+        else
+            el.h = oldH
+        end
+    elseif input.key == "wPercent" then
+        el.wPercent = clamp(el.wPercent or 0, 1, 100)
+        el.relativeW = true
+    elseif input.key == "hPercent" then
+        el.hPercent = clamp(el.hPercent or 0, 1, 100)
+        el.relativeH = true
     elseif input.key == "radius"       then el.radius       = clamp(el.radius, 0, math.floor(math.min(el.w, el.h)/2))
     elseif input.key == "headerHeight" then el.headerHeight = clamp(el.headerHeight, 24, math.max(24, el.h))
     elseif input.key == "titlePaddingX"then el.titlePaddingX= clamp(el.titlePaddingX, 0, math.floor(el.w/2))
     elseif input.key == "borderWidth"  then el.borderWidth  = clamp(el.borderWidth, 0, 100)
     end
 
+    normalizeElementLayout(el)
+
+    if input.key == "imagePath" then
+        updateAssetLibrary()
+    end
     editor.activeInput = nil
     markDirty()
     return true
 end
 
-local function cancelActiveInput() editor.activeInput = nil; editor.panelDirty = true end
-
 local COLOR_PICKER_W = 220
-local COLOR_PICKER_H = 196
+local COLOR_PICKER_H = 260
 
 local function commitColorPicker()
     if not editor.colorPicker then return end
@@ -1238,10 +2197,19 @@ local function commitColorPicker()
     if not el or el.id ~= cp.elementId then editor.colorPicker = nil; return end
     saveUndoState()
     el[cp.key] = {cp.r, cp.g, cp.b, cp.a}
+    local newColor = {cp.r, cp.g, cp.b, cp.a}
+    local isDuplicate = false
+    for _, rc in ipairs(editor.recentColors) do
+        if rc[1]==newColor[1] and rc[2]==newColor[2] and rc[3]==newColor[3] and rc[4]==newColor[4] then isDuplicate=true; break end
+    end
+    if not isDuplicate then
+        table.insert(editor.recentColors, 1, newColor)
+        if #editor.recentColors > 12 then table.remove(editor.recentColors) end
+    end
     markDirty()
 end
 
-local function drawColorPicker(screenW, screenH)
+function drawColorPicker(screenW, screenH)
     if not editor.colorPicker then return end
     local cp = editor.colorPicker
 
@@ -1292,15 +2260,115 @@ local function drawColorPicker(screenW, screenH)
     dxDrawUiRounded("cpicker_hex", px+8, hexY, COLOR_PICKER_W-16, 22, 4, tocolor(32,37,49,255))
     dxDrawText(hexStr, px+8, hexY, px+COLOR_PICKER_W-8, hexY+22, themeColors.text, 1, UI_FONT_BOLD_SM, "center", "center", false, false, false)
     addHotbox("color_hex_copy", px+8, hexY, COLOR_PICKER_W-16, 22, {hex=hexStr})
+
+    if #editor.recentColors > 0 and not _skipPanelDraw then
+        local rcY = hexY + 28
+        dxDrawText("Son Kullanilan:", px+8, rcY, px+COLOR_PICKER_W-8, rcY+14, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
+        rcY = rcY + 16
+        local swSize = 18
+        local swGap = 4
+        local maxPerRow = math.floor((COLOR_PICKER_W - 16) / (swSize + swGap))
+        for i, rc in ipairs(editor.recentColors) do
+            local col2 = (i-1) % maxPerRow
+            local row2 = math.floor((i-1) / maxPerRow)
+            local rcX2 = px + 8 + col2 * (swSize + swGap)
+            local rcY2 = rcY + row2 * (swSize + swGap)
+            dxDrawUiRounded("rc_" .. i, rcX2, rcY2, swSize, swSize, 3, tocolor(rc[1], rc[2], rc[3], rc[4] or 255))
+            addHotbox("recent_color", rcX2, rcY2, swSize, swSize, {r=rc[1], g=rc[2], b=rc[3], a=rc[4] or 255})
+        end
+    end
 end
 
 local SAVE_FILE   = "dxui_save.xml"
 local EXPORT_FILE = "dxui_export.lua"
-local COLOR_KEYS = {color=true, headerColor=true, bodyColor=true, textColor=true, shadowColor=true, hoverColor=true, borderColor=true}
+local PREFAB_FILE = "dxui_prefabs.xml"
+local PROJECT_SCHEMA_VERSION = 1
+local PROJECT_BACKUP_LIMIT = 5
+local COLOR_KEYS = {color=true, headerColor=true, bodyColor=true, textColor=true, shadowColor=true, hoverColor=true, borderColor=true, progressColor=true, boxColor=true, checkColor=true, gradientColor=true}
+
+local function readLocalFile(path)
+    local file = fileOpen(path, true)
+    if not file then return nil end
+    local size = fileGetSize(file)
+    local data = fileRead(file, size)
+    fileClose(file)
+    if not data or #data == 0 then return nil end
+    return data
+end
+
+local function writeLocalFile(path, data)
+    if fileExists(path) then
+        fileDelete(path)
+    end
+    local file = fileCreate(path)
+    if not file then return false end
+    fileWrite(file, data)
+    fileClose(file)
+    return true
+end
+
+local function rotateProjectBackups()
+    for i = PROJECT_BACKUP_LIMIT, 1, -1 do
+        local currentPath = string.format("dxui_save.backup%d.xml", i)
+        if fileExists(currentPath) then
+            if i == PROJECT_BACKUP_LIMIT then
+                fileDelete(currentPath)
+            else
+                local data = readLocalFile(currentPath)
+                if data then
+                    writeLocalFile(string.format("dxui_save.backup%d.xml", i + 1), data)
+                end
+                fileDelete(currentPath)
+            end
+        end
+    end
+end
+
+local function backupProjectFile()
+    local existingData = readLocalFile(SAVE_FILE)
+    if not existingData then return end
+    rotateProjectBackups()
+    writeLocalFile("dxui_save.backup1.xml", existingData)
+end
+
+local function openProjectXml()
+    local xml = xmlLoadFile(SAVE_FILE)
+    if xml then return xml, SAVE_FILE end
+    for i = 1, PROJECT_BACKUP_LIMIT do
+        local backupPath = string.format("dxui_save.backup%d.xml", i)
+        local backupXml = xmlLoadFile(backupPath)
+        if backupXml then
+            return backupXml, backupPath
+        end
+    end
+    return nil, nil
+end
+
+local function deserializeElementAttributes(attributes)
+    local el = {}
+    for key, value in pairs(attributes) do
+        local cp = parseColorString(value)
+        if cp and COLOR_KEYS[key] then
+            el[key] = cp
+        elseif value == "true" then
+            el[key] = true
+        elseif value == "false" then
+            el[key] = false
+        elseif tonumber(value) and key ~= "id" and key ~= "type" and key ~= "title" and key ~= "text" and key ~= "font" and key ~= "alignX" and key ~= "alignY" and key ~= "imagePath" and key ~= "placeholder" and key ~= "iconName" and key ~= "gradientMode" then
+            el[key] = tonumber(value)
+        else
+            el[key] = value
+        end
+    end
+    return el
+end
 
 local function saveToFile()
+    backupProjectFile()
     local xml = xmlCreateFile(SAVE_FILE, "dxui")
     if not xml then outputChatBox("[DX UI Creator] Kayıt dosyası oluşturulamadı.", 214,76,76,true); return end
+    xmlNodeSetAttribute(xml, "schemaVersion", tostring(PROJECT_SCHEMA_VERSION))
+    xmlNodeSetAttribute(xml, "savedAt", tostring((getRealTime() or {}).timestamp or getTickCount()))
     xmlNodeSetAttribute(xml, "nextId",  tostring(editor.nextId))
     xmlNodeSetAttribute(xml, "canvasW", tostring(editor.canvas.width))
     xmlNodeSetAttribute(xml, "canvasH", tostring(editor.canvas.height))
@@ -1317,32 +2385,68 @@ local function saveToFile()
 end
 
 local function loadFromFile()
-    local xml = xmlLoadFile(SAVE_FILE)
+    local xml, loadedPath = openProjectXml()
     if not xml then outputChatBox("[DX UI Creator] Kayıt dosyası bulunamadı: "..SAVE_FILE, 214,76,76,true); return end
     saveUndoState()
     destroyRoundedCache()
-    editor.elements = {}; editor.selectedId=nil; editor.activeInput=nil; editor.interaction=nil; editor.colorPicker=nil
+    editor.elements = {}; clearSelection(); editor.activeInput=nil; editor.interaction=nil; editor.colorPicker=nil
     editor.nextId = tonumber(xmlNodeGetAttribute(xml,"nextId")) or editor.nextId
     editor.canvas.width  = tonumber(xmlNodeGetAttribute(xml,"canvasW")) or editor.canvas.width
     editor.canvas.height = tonumber(xmlNodeGetAttribute(xml,"canvasH")) or editor.canvas.height
     for _, node in ipairs(xmlNodeGetChildren(xml) or {}) do
         if xmlNodeGetName(node) == "element" then
-            local el = {}
-            for key, value in pairs(xmlNodeGetAttributes(node)) do
-                local cp = parseColorString(value)
-                if cp and COLOR_KEYS[key] then el[key] = cp
-                elseif value == "true"  then el[key] = true
-                elseif value == "false" then el[key] = false
-                elseif tonumber(value) and key~="id" and key~="type" and key~="title" and key~="text" and key~="font" and key~="alignX" and key~="alignY" and key~="imagePath" then
-                    el[key] = tonumber(value)
-                else el[key] = value end
-            end
+            local el = deserializeElementAttributes(xmlNodeGetAttributes(node))
             if el.id and el.type then table.insert(editor.elements, el) end
         end
     end
     xmlUnloadFile(xml)
+    updateAssetLibrary()
     markDirty()
+    if loadedPath and loadedPath ~= SAVE_FILE then
+        outputChatBox("[DX UI Creator] Yedek proje yuklendi: "..loadedPath, 230,164,52,true)
+    end
     outputChatBox("[DX UI Creator] Yüklendi: "..SAVE_FILE.." ("..#editor.elements.." eleman)", 115,191,136,true)
+end
+
+local function savePrefabsToFile()
+    local xml = xmlCreateFile(PREFAB_FILE, "prefabs")
+    if not xml then return end
+    for _, prefab in ipairs(editor.prefabList) do
+        local pnode = xmlCreateChild(xml, "prefab")
+        xmlNodeSetAttribute(pnode, "name", prefab.name or "prefab")
+        for _, item in ipairs(prefab.items or {}) do
+            local node = xmlCreateChild(pnode, "element")
+            for key, value in pairs(item) do
+                if type(value) == "table" and COLOR_KEYS[key] then
+                    xmlNodeSetAttribute(node, key, colorToString(value))
+                elseif type(value) ~= "table" then
+                    xmlNodeSetAttribute(node, key, tostring(value))
+                end
+            end
+        end
+    end
+    xmlSaveFile(xml)
+    xmlUnloadFile(xml)
+end
+
+local function loadPrefabsFromFile()
+    ensureStylePresets()
+    editor.prefabList = {}
+    local xml = xmlLoadFile(PREFAB_FILE)
+    if not xml then return end
+    for _, pnode in ipairs(xmlNodeGetChildren(xml) or {}) do
+        if xmlNodeGetName(pnode) == "prefab" then
+            local prefab = {name = xmlNodeGetAttribute(pnode, "name") or ("prefab_" .. tostring(#editor.prefabList + 1)), items = {}}
+            for _, node in ipairs(xmlNodeGetChildren(pnode) or {}) do
+                if xmlNodeGetName(node) == "element" then
+                    local el = deserializeElementAttributes(xmlNodeGetAttributes(node))
+                    prefab.items[#prefab.items+1] = el
+                end
+            end
+            editor.prefabList[#editor.prefabList+1] = prefab
+        end
+    end
+    xmlUnloadFile(xml)
 end
 
 local function saveToXmlOnStop()
@@ -1355,6 +2459,13 @@ local EXPORT_PROPERTY_ORDER = {
     button    = {"id","type","x","y","w","h","text","fontScale","font","alignX","alignY","clip","wordBreak","colorCoded","radius","color","hoverColor","textColor","shadowColor","shadowOffsetX","shadowOffsetY"},
     label     = {"id","type","x","y","w","h","text","fontScale","font","alignX","alignY","clip","wordBreak","colorCoded","textColor","shadowColor","shadowOffsetX","shadowOffsetY"},
     image     = {"id","type","x","y","w","h","imagePath","color","radius"},
+    container = {"id","type","x","y","w","h","color","radius"},
+    progressbar = {"id","type","x","y","w","h","progress","text","color","progressColor","textColor","radius","fontScale","font","alignX","alignY"},
+    checkbox  = {"id","type","x","y","w","h","checked","text","boxColor","checkColor","textColor","fontScale","font"},
+    editbox   = {"id","type","x","y","w","h","text","placeholder","color","borderColor","textColor","fontScale","font","radius","masked"},
+    line      = {"id","type","x","y","w","h","color","thickness"},
+    gradient  = {"id","type","x","y","w","h","color","gradientColor","gradientMode","radius"},
+    icon      = {"id","type","x","y","w","h","iconName","color","iconSize"},
     circle    = {"id","type","x","y","w","h","color","borderColor","borderWidth"},
 }
 
@@ -1377,33 +2488,98 @@ local function createElementCode(el)
     local order = EXPORT_PROPERTY_ORDER[el.type]
     if not order then return "    { }," end
     local parts = {}
+    local writtenKeys = {}
     for _, key in ipairs(order) do
+        writtenKeys[key] = true
         if el[key] ~= nil then
+            parts[#parts+1] = string.format("%s = %s", key, serializeLuaValue(el[key]))
+        end
+    end
+    for _, key in ipairs(COMMON_EXPORT_KEYS) do
+        if not writtenKeys[key] and el[key] ~= nil then
             parts[#parts+1] = string.format("%s = %s", key, serializeLuaValue(el[key]))
         end
     end
     return "    { "..table.concat(parts, ", ").." },"
 end
 
-local function generateExportCode()
-    local L = {}
-    local function ln(s) L[#L+1] = s end
+local function buildProjectStateHash()
+    local parts = {
+        tostring(editor.nextId),
+        tostring(editor.canvas.width),
+        tostring(editor.canvas.height),
+        tostring(#editor.elements),
+    }
 
-    ln("local sx, sy = guiGetScreenSize()")
-    ln(string.format("local _cw, _ch = %d, %d", editor.canvas.width, editor.canvas.height))
-    ln("local scaleX, scaleY = sx / _cw, sy / _ch")
-    ln("local _scale = math.min(scaleX, scaleY)")
-    ln("local _offX  = (sx - _cw * _scale) / 2")
-    ln("local _offY  = (sy - _ch * _scale) / 2")
-    ln("local rounded = {}")
-    ln("local circles  = {}")
-    ln("")
-    ln("local uiElements = {")
-    if #editor.elements == 0 then ln("    -- Henuz eleman yok.")
-    else for _, el in ipairs(editor.elements) do ln(createElementCode(el)) end end
+    for _, el in ipairs(editor.elements) do
+        parts[#parts+1] = tostring(el.id or "")
+        parts[#parts+1] = tostring(el.type or "")
+        for _, key in ipairs(COMMON_EXPORT_KEYS) do
+            parts[#parts+1] = key .. "=" .. serializeLuaValue(el[key])
+        end
+
+        local order = EXPORT_PROPERTY_ORDER[el.type] or {}
+        for _, key in ipairs(order) do
+            if key ~= "id" and key ~= "type" then
+                parts[#parts+1] = key .. "=" .. serializeLuaValue(el[key])
+            end
+        end
+    end
+
+    return table.concat(parts, "|")
+end
+
+local function getUsedIconSvgs()
+    local icons = {}
+    for _, el in ipairs(editor.elements) do
+        if el.type == "icon" and el.iconName and ICON_SVGS[el.iconName] then
+            icons[el.iconName] = ICON_SVGS[el.iconName]
+        end
+    end
+    return icons
+end
+
+local function appendExportIconRuntime(L)
+    local usedIcons = getUsedIconSvgs()
+    local names = {}
+    for name in pairs(usedIcons) do
+        names[#names+1] = name
+    end
+    if #names == 0 then
+        local function ln(s) L[#L+1] = s end
+        ln("local function getIconTexture(name) return nil end")
+        return false
+    end
+
+    table.sort(names)
+
+    local function ln(s) L[#L+1] = s end
+    ln("local _iconCache = {}")
+    ln("local _iconSvgs = {")
+    for _, name in ipairs(names) do
+        local svg = usedIcons[name]
+        local sw = tonumber(svg:match('width=\"(%d+)\"')) or 24
+        local sh = tonumber(svg:match('height=\"(%d+)\"')) or 24
+        ln(string.format("    [%s] = { w = %d, h = %d, svg = %s },", serializeLuaValue(name), sw, sh, serializeLuaValue(svg)))
+    end
     ln("}")
+    ln("local function getIconTexture(name)")
+    ln("    local data = _iconSvgs[name]")
+    ln("    if not data then return nil end")
+    ln("    local cached = _iconCache[name]")
+    ln("    if cached and isElement(cached) then return cached end")
+    ln("    cached = svgCreate(data.w, data.h, data.svg)")
+    ln("    if cached then _iconCache[name] = cached end")
+    ln("    return cached")
+    ln("end")
     ln("")
-    ln("local function rgba(c) return tocolor(c[1],c[2],c[3],c[4] or 255) end")
+
+    return true
+end
+
+local function appendCommonExportRuntime(L, hasCustomFonts, hasHttpImages)
+    local function ln(s) L[#L+1] = s end
+    ln("local function rgba(c) if type(c)~=\"table\" then return tocolor(255,255,255,255) end return tocolor(c[1],c[2],c[3],c[4] or 255) end")
     ln("local function hasColor(c) return type(c)==\"table\" and (c[4] or 255)>0 end")
     ln("")
     ln("local function isCursorOnRect(x,y,w,h)")
@@ -1413,10 +2589,16 @@ local function generateExportCode()
     ln("    return cx>=x and cx<=x+w and cy>=y and cy<=y+h")
     ln("end")
     ln("")
-    ln("local function _res() sx,sy=guiGetScreenSize(); scaleX,scaleY=sx/_cw,sy/_ch; _scale=math.min(scaleX,scaleY); _offX=(sx-_cw*_scale)/2; _offY=(sy-_ch*_scale)/2 end")
-    ln("addEventHandler(\"onClientResourceStart\",resourceRoot,_res)")
+    if hasCustomFonts then
+        ln("local function _init() sx,sy=guiGetScreenSize(); scaleX,scaleY=sx/_cw,sy/_ch; _scale=math.min(scaleX,scaleY); _offX=(sx-_cw*_scale)/2; _offY=(sy-_ch*_scale)/2; loadFonts() end")
+        ln("addEventHandler(\"onClientResourceStart\",resourceRoot,_init)")
+    else
+        ln("local function _res() sx,sy=guiGetScreenSize(); scaleX,scaleY=sx/_cw,sy/_ch; _scale=math.min(scaleX,scaleY); _offX=(sx-_cw*_scale)/2; _offY=(sy-_ch*_scale)/2 end")
+        ln("addEventHandler(\"onClientResourceStart\",resourceRoot,_res)")
+    end
     ln("")
     ln("local function dxDrawRounded(id,x,y,w,h,radius,color,postGUI)")
+    ln("    id = tostring(id or 'generic')")
     ln("    w=math.max(1,math.floor(w+0.5)); h=math.max(1,math.floor(h+0.5))")
     ln("    radius=math.min(math.floor((radius or 0)+0.5), math.floor(math.min(w,h)/2))")
     ln("    if radius<=0 then dxDrawRectangle(x,y,w,h,color,postGUI or false); return end")
@@ -1429,6 +2611,7 @@ local function generateExportCode()
     ln("end")
     ln("")
     ln("local function dxDrawCircle(id,x,y,w,h,color,postGUI)")
+    ln("    id = tostring(id or 'generic')")
     ln("    w=math.max(1,math.floor(w+0.5)); h=math.max(1,math.floor(h+0.5))")
     ln("    local key=w..'_'..h")
     ln("    circles[id]=circles[id] or {}")
@@ -1439,12 +2622,27 @@ local function generateExportCode()
     ln("    if circles[id][key] then dxDrawImage(x,y,w,h,circles[id][key],0,0,0,color,postGUI or false) end")
     ln("end")
     ln("")
-    ln("local _builtinFonts={[\"default\"]=true,[\"default-bold\"]=true,[\"arial\"]=true,[\"bankgothic\"]=true,[\"clear\"]=true,[\"danielbd\"]=true,[\"pricedown\"]=true,[\"sans\"]=true,[\"unifont\"]=true}")
-    ln("local function resolveFont(name) if not name or not _builtinFonts[name] then return \"default-bold\" end; return name end")
+    ln("function drawOutline(x,y,w,h,color,thickness)")
+    ln("    thickness = thickness or 1")
+    ln("    dxDrawRectangle(x,y,w,thickness,color)")
+    ln("    dxDrawRectangle(x,y+h-thickness,w,thickness,color)")
+    ln("    dxDrawRectangle(x,y,thickness,h,color)")
+    ln("    dxDrawRectangle(x+w-thickness,y,thickness,h,color)")
+    ln("end")
+    ln("function utfLen(s) local _, count = tostring(s or ''):gsub('[\\128-\\191]', '') return count end")
+    ln("function utfSub(s, i, j) return string.sub(s, i, j) end")
+    ln("local function delChar(s) if not s or #s==0 then return \"\" end return string.sub(s, 1, #s-1) end")
     ln("")
-    ln("local function drawStyledText(text,left,top,right,bottom,opts)")
+    ln("function drawStyledText(text,left,top,right,bottom,opts)")
     ln("    local scale=(opts.fontScale or 1)")
-    ln("    local font=resolveFont(opts.font)")
+
+    if hasCustomFonts then
+        ln("    local font=resolveFont(opts.font)")
+    else
+        ln("    local _bf={[\"default\"]=true,[\"default-bold\"]=true,[\"arial\"]=true,[\"bankgothic\"]=true,[\"clear\"]=true,[\"danielbd\"]=true,[\"pricedown\"]=true,[\"sans\"]=true,[\"unifont\"]=true}")
+        ln("    local font=(opts.font and _bf[opts.font]) and opts.font or 'default-bold'")
+    end
+
     ln("    if hasColor(opts.shadowColor) then")
     ln("        local sx2=(opts.shadowOffsetX or 1)*scaleX; local sy2=(opts.shadowOffsetY or 1)*scaleY")
     ln("        dxDrawText(text,left+sx2,top+sy2,right+sx2,bottom+sy2,rgba(opts.shadowColor),scale,font,opts.alignX or 'left',opts.alignY or 'center',opts.clip,opts.wordBreak,false,opts.colorCoded)")
@@ -1452,8 +2650,18 @@ local function generateExportCode()
     ln("    dxDrawText(text,left,top,right,bottom,rgba(opts.textColor or {255,255,255,255}),scale,font,opts.alignX or 'left',opts.alignY or 'center',opts.clip,opts.wordBreak,false,opts.colorCoded)")
     ln("end")
     ln("")
+    ln("local function resolveAnchoredRect(el)")
+    ln("    local x = el.x or 0")
+    ln("    local y = el.y or 0")
+    ln("    local w = (el.relativeW and el.wPercent) and math.max(20, math.floor(_cw * (el.wPercent / 100) + 0.5)) or (el.w or 0)")
+    ln("    local h = (el.relativeH and el.hPercent) and math.max(20, math.floor(_ch * (el.hPercent / 100) + 0.5)) or (el.h or 0)")
+    ln("    if el.dockX == 'fill' then w = math.max(20, _cw - x - math.max(0, el.dockPaddingRight or 0)) elseif el.anchorX == 'center' then x = (_cw - w) / 2 + x elseif el.anchorX == 'right' then x = _cw - w - x end")
+    ln("    if el.dockY == 'fill' then h = math.max(20, _ch - y - math.max(0, el.dockPaddingBottom or 0)) elseif el.anchorY == 'center' then y = (_ch - h) / 2 + y elseif el.anchorY == 'bottom' then y = _ch - h - y end")
+    ln("    return x*_scale+_offX, y*_scale+_offY, w*_scale, h*_scale")
+    ln("end")
+    ln("")
     ln("local function drawUiElement(el)")
-    ln("    local x,y,w,h=el.x*_scale+_offX, el.y*_scale+_offY, el.w*_scale, el.h*_scale")
+    ln("    local x,y,w,h=resolveAnchoredRect(el)")
     ln("    if el.type==\"window\" then")
     ln("        local hh=math.min(h,math.max(24*scaleY,(el.headerHeight or 40)*scaleY))")
     ln("        local px=(el.titlePaddingX or 16)*scaleX")
@@ -1472,12 +2680,58 @@ local function generateExportCode()
     ln("    elseif el.type==\"image\" then")
     ln("        local r=(el.radius or 0)*math.min(scaleX,scaleY)")
     ln("        if el.imagePath and el.imagePath~=\"\" then")
-    ln("            if not el._tex or not isElement(el._tex) then el._tex=dxCreateTexture(el.imagePath,'argb',true,'clamp') end")
-    ln("            if el._tex then")
-    ln("                dxDrawImage(x,y,w,h,el._tex,0,0,0,rgba(el.color or {255,255,255,255}))")
+    ln("            local isHttp=el.imagePath:sub(1,7)==\"http://\" or el.imagePath:sub(1,8)==\"https://\"")
+    ln("            local tex")
+    if hasHttpImages then
+        ln("            if isHttp then")
+        ln("                tex=getRemoteTex(el.imagePath)")
+        ln("            else")
+        ln("                if not el._tex or not isElement(el._tex) then el._tex=dxCreateTexture(el.imagePath,'argb',true,'clamp') end")
+        ln("                tex=el._tex")
+        ln("            end")
+    else
+        ln("            if not isHttp then")
+        ln("                if not el._tex or not isElement(el._tex) then el._tex=dxCreateTexture(el.imagePath,'argb',true,'clamp') end")
+        ln("                tex=el._tex")
+        ln("            end")
+    end
+    ln("            if tex then")
+    ln("                dxDrawImage(x,y,w,h,tex,0,0,0,rgba(el.color or {255,255,255,255}))")
     ln("            else")
     ln("                dxDrawRounded(el.id,x,y,w,h,r,rgba(el.color or {255,255,255,255}))")
     ln("            end")
+    ln("        end")
+    ln("    elseif el.type==\"container\" then")
+    ln("        dxDrawRounded(el.id,x,y,w,h,(el.radius or 0)*math.min(scaleX,scaleY),rgba(el.color))")
+    ln("    elseif el.type==\"progressbar\" then")
+    ln("        local r=(el.radius or 0)*math.min(scaleX,scaleY)")
+    ln("        dxDrawRounded(el.id..'_bg',x,y,w,h,r,rgba(el.color))")
+    ln("        local fillW=w*((el.progress or 0)/100)")
+    ln("        dxDrawRounded(el.id..'_fill',x,y,fillW,h,r,rgba(el.progressColor or {72,199,130,255}))")
+    ln("        if el.text and el.text~='' then drawStyledText(el.text,x,y,x+w,y+h,el) end")
+    ln("    elseif el.type==\"checkbox\" then")
+    ln("        local box=math.min(h,22*scaleY)")
+    ln("        dxDrawRounded(el.id..'_box',x,y+(h-box)/2,box,box,4,rgba(el.boxColor or {27,31,42,230}))")
+    ln("        if el.checked then dxDrawText('X',x,y+(h-box)/2,x+box,y+(h+box)/2,rgba(el.checkColor or {72,199,130,255}),1,'default-bold','center','center') end")
+    ln("        drawStyledText(el.text or '',x+box+8*scaleX,y,x+w,y+h,el)")
+    ln("    elseif el.type==\"editbox\" then")
+    ln("        dxDrawRounded(el.id..'_eb',x,y,w,h,(el.radius or 0)*math.min(scaleX,scaleY),rgba(el.color or {20,24,32,235}))")
+    ln("        if hasColor(el.borderColor) then drawOutline(x,y,w,h,rgba(el.borderColor),1) end")
+    ln("        local shown=(el.text and el.text~='') and el.text or (el.placeholder or '')")
+    ln("        if el.masked and el.text and el.text~='' then shown=string.rep('*', utfLen(el.text)) end")
+    ln("        drawStyledText(shown,x+12*scaleX,y,x+w-12*scaleX,y+h,{font=el.font,fontScale=el.fontScale,textColor=(el.text and el.text~='') and (el.textColor or {255,255,255,255}) or {160,165,180,255},alignX='left',alignY='center'})")
+    ln("    elseif el.type==\"line\" then")
+    ln("        dxDrawLine(x,y+h/2,x+w,y+h/2,rgba(el.color or {255,255,255,200}),el.thickness or 2)")
+    ln("    elseif el.type==\"gradient\" then")
+    ln("        local steps=20")
+    ln("        local c1 = type(el.color)=='table' and el.color or {255,255,255,255}; local c2 = type(el.gradientColor)=='table' and el.gradientColor or {0,0,0,255}; for i=0,steps-1 do local t=i/(steps-1); local c={c1[1]+(c2[1]-c1[1])*t, c1[2]+(c2[2]-c1[2])*t, c1[3]+(c2[3]-c1[3])*t, (c1[4] or 255)+((c2[4] or 255)-(c1[4] or 255))*t}; if el.gradientMode=='vertical' then dxDrawRectangle(x,y+(h/steps)*i,w,math.ceil(h/steps),rgba(c)) else dxDrawRectangle(x+(w/steps)*i,y,math.ceil(w/steps),h,rgba(c)) end end")
+    ln("    elseif el.type==\"icon\" then")
+    ln("        local icon = getIconTexture(el.iconName)")
+    ln("        if icon then")
+    ln("            local size=math.min(w,h,(el.iconSize or 24)*math.min(scaleX,scaleY))")
+    ln("            dxDrawImage(x+(w-size)/2,y+(h-size)/2,size,size,icon,0,0,0,rgba(el.color or {255,255,255,255}))")
+    ln("        else")
+    ln("            dxDrawText(string.upper((el.iconName or '?'):sub(1,1)),x,y,x+w,y+h,rgba(el.color or {255,255,255,255}),1,'default-bold','center','center')")
     ln("        end")
     ln("    elseif el.type==\"circle\" then")
     ln("        if (el.borderWidth or 0)>0 and hasColor(el.borderColor) then")
@@ -1488,21 +2742,135 @@ local function generateExportCode()
     ln("    end")
     ln("end")
     ln("")
+
+    ln("local activeInput = nil")
+    ln("addEventHandler('onClientClick', root, function(btn, state)")
+    ln("    if btn~='left' or state~='down' then return end")
+    ln("    local clickedAny = false")
+    ln("    for i=#uiElements,1,-1 do")
+    ln("        local el=uiElements[i]")
+    ln("        if el.visible~=false then")
+    ln("            local x,y,w,h=resolveAnchoredRect(el)")
+    ln("            if isCursorOnRect(x,y,w,h) then")
+    ln("                clickedAny=true")
+    ln("                if el.type=='editbox' then activeInput=el else activeInput=nil end")
+    ln("                if el.type=='checkbox' then el.checked = not el.checked end")
+    ln("                if el.clickAction and el.clickAction~='none' then")
+    ln("                    if el.clickAction=='toggle_visibility' then")
+    ln("                         for _,tgt in ipairs(uiElements) do if tgt.id==el.actionTarget then tgt.visible = not tgt.visible end end")
+    ln("                    elseif el.clickAction=='show' then")
+    ln("                         for _,tgt in ipairs(uiElements) do if tgt.id==el.actionTarget then tgt.visible = true end end")
+    ln("                    elseif el.clickAction=='hide' then")
+    ln("                         for _,tgt in ipairs(uiElements) do if tgt.id==el.actionTarget then tgt.visible = false end end")
+    ln("                    elseif el.clickAction=='trigger_event' then")
+    ln("                         triggerEvent(el.actionValue or '', localPlayer, el)")
+    ln("                    elseif el.clickAction=='chat_message' then")
+    ln("                         outputChatBox(el.actionValue or '', 255,255,255,true)")
+    ln("                    end")
+    ln("                end")
+    ln("                break")
+    ln("            end")
+    ln("        end")
+    ln("    end")
+    ln("    if not clickedAny then activeInput=nil end")
+    ln("end)")
+    ln("")
+    ln("addEventHandler('onClientCharacter', root, function(char)")
+    ln("    if not activeInput then return end")
+    ln("    activeInput.text = (activeInput.text or '')..char")
+    ln("end)")
+    ln("")
+    ln("addEventHandler('onClientKey', root, function(btn, down)")
+    ln("    if not activeInput or not down then return end")
+    ln("    if btn=='backspace' then")
+    ln("        local t=activeInput.text or ''")
+    ln("        if #t > 0 then")
+    ln("            local u=t:gsub('[\\128-\\191]', '')")
+    ln("            if #u>0 then activeInput.text=delChar(t) end") -- Need a better utf8 delete, but string.sub works for standard
+    ln("        end")
+    ln("    end")
+    ln("end)")
+    ln("")
     ln("local function renderCreatedUi()")
     ln("    for _,el in ipairs(uiElements) do if el.visible~=false then drawUiElement(el) end end")
     ln("end")
     ln("")
     ln("addEventHandler(\"onClientRender\", root, renderCreatedUi)")
+    ln("")
+    ln("-- Animation Runtime")
+    ln("local _animStartTick = getTickCount()")
+    ln("local _animClickTicks = {}")
+    ln("local function lerp2(a,b,t) return a+(b-a)*t end")
+    ln("local function easeOut(t) t=math.min(math.max(t,0),1); return 1-(1-t)*(1-t) end")
+    ln("local function getAnimProgress(el, hovered)")
+    ln("    local aType = el.animationType or 'none'")
+    ln("    if aType == 'none' then return nil, false end")
+    ln("    local trigger = el.animationTrigger or 'auto'")
+    ln("    local dur = math.min(math.max(tonumber(el.animationDuration) or 1200, 120), 10000)")
+    ln("    local now = getTickCount()")
+    ln("    if trigger == 'hover' then return hovered and 1 or 0, false end")
+    ln("    if trigger == 'click' then")
+    ln("        local st = _animClickTicks[el.id]; if not st then return 0, false end")
+    ln("        local t = math.min((now-st)/dur, 1); if t>=1 then _animClickTicks[el.id]=nil end; return t, t<1")
+    ln("    end")
+    ln("    local elapsed = now - _animStartTick")
+    ln("    if el.animationLoop then return (elapsed % dur) / dur, true end")
+    ln("    return math.min(elapsed / dur, 1), elapsed < dur")
+    ln("end")
+    ln("")
+    ln("local function applyAnim(el, x, y, w, h, hovered)")
+    ln("    local aType = el.animationType or 'none'")
+    ln("    if aType == 'none' then return x, y, w, h, 1 end")
+    ln("    local progress, looped = getAnimProgress(el, hovered)")
+    ln("    if not progress then return x, y, w, h, 1 end")
+    ln("    local intensity = math.min(math.max(tonumber(el.animationIntensity) or 18, 0), 100)")
+    ln("    local scale2, alpha, offX, offY = 1, 1, 0, 0")
+    ln("    local wave = looped and (0.5-0.5*math.cos(progress*math.pi*2)) or math.sin(progress*math.pi)")
+    ln("    local eased = easeOut(progress)")
+    ln("    if aType=='fade' then alpha=looped and (0.35+wave*0.65) or math.max(0.05,eased)")
+    ln("    elseif aType=='pulse' then scale2=1+(intensity/100)*(looped and wave or math.max(0,wave))")
+    ln("    elseif aType=='float' then offY=looped and (math.sin(progress*math.pi*2)*(intensity/100)*math.max(w,h)*0.25) or (-wave*(intensity/100)*math.max(w,h)*0.25)")
+    ln("    elseif aType=='slide-left' then offX=looped and (-math.sin(progress*math.pi*2)*intensity) or (-(1-eased)*intensity)")
+    ln("    elseif aType=='slide-right' then offX=looped and (math.sin(progress*math.pi*2)*intensity) or ((1-eased)*intensity)")
+    ln("    elseif aType=='slide-up' then offY=looped and (-math.sin(progress*math.pi*2)*intensity) or (-(1-eased)*intensity)")
+    ln("    elseif aType=='slide-down' then offY=looped and (math.sin(progress*math.pi*2)*intensity) or ((1-eased)*intensity)")
+    ln("    elseif aType=='zoom' then local fs=1-intensity/120; scale2=looped and (1+(wave-0.5)*(intensity/100)) or lerp2(fs,1,eased)")
+    ln("    end")
+    ln("    local dw=math.max(1,w*scale2); local dh=math.max(1,h*scale2)")
+    ln("    return x-(dw-w)/2+offX, y-(dh-h)/2+offY, dw, dh, alpha")
+    ln("end")
+end
+
+local function generateExportCode()
+    local L = {}
+    local function ln(s) L[#L+1] = s end
+
+    ln("local sx, sy = guiGetScreenSize()")
+    ln(string.format("local _cw, _ch = %d, %d", editor.canvas.width, editor.canvas.height))
+    ln("local scaleX, scaleY = sx / _cw, sy / _ch")
+    ln("local _scale = math.min(scaleX, scaleY)")
+    ln("local _offX  = (sx - _cw * _scale) / 2")
+    ln("local _offY  = (sy - _ch * _scale) / 2")
+    ln("local rounded = {}")
+    ln("local circles  = {}")
+    ln("")
+    appendExportIconRuntime(L)
+    ln("local uiElements = {")
+    if #editor.elements == 0 then ln("    -- Henuz eleman yok.")
+    else for _, el in ipairs(editor.elements) do ln(createElementCode(el)) end end
+    ln("}")
+    ln("")
+    appendCommonExportRuntime(L, false, false)
 
     editor.exportCache  = table.concat(L, "\n")
     editor.exportDirty  = false
 end
 
-local function ensureExport()
+function ensureExport()
     if editor.exportDirty then generateExportCode() end
 end
 
-local function getUsedCustomFonts()
+function getUsedCustomFonts()
     local used = {}
     for _, el in ipairs(editor.elements) do
         local fontName = el.font
@@ -1518,7 +2886,7 @@ local function getUsedCustomFonts()
     return used
 end
 
-local function getUsedRemoteImages()
+function getUsedRemoteImages()
     local urls = {}
     for _, el in ipairs(editor.elements) do
         if el.type == "image" and el.imagePath and el.imagePath ~= "" then
@@ -1531,7 +2899,7 @@ local function getUsedRemoteImages()
     return urls
 end
 
-local function getUsedHttpImages()
+function getUsedHttpImages()
     local urls = {}
     for _, el in ipairs(editor.elements) do
         if el.type == "image" and el.imagePath and el.imagePath ~= "" then
@@ -1544,30 +2912,48 @@ local function getUsedHttpImages()
     return urls
 end
 
-local function generateExportServerCode()
+function generateExportServerCode()
     local L = {}
     local function ln(s) L[#L+1] = s end
+    ln("local MAX_REMOTE_IMAGE_BYTES = 5242880")
+    ln("local function isSafeUrl(url)")
+    ln("    if type(url) ~= 'string' then return false end")
+    ln("    url = url:gsub('^%s+', ''):gsub('%s+$', '')")
+    ln("    local lower = url:lower()")
+    ln("    if #lower < 10 or #lower > 2048 then return false end")
+    ln("    if lower:sub(1,7) ~= 'http://' and lower:sub(1,8) ~= 'https://' then return false end")
+    ln("    local host = lower:match('^https?://([^/%?#:]+)')")
+    ln("    if not host then return false end")
+    ln("    if host == 'localhost' or host == '127.0.0.1' or host == '[::1]' or host == '::1' then return false end")
+    ln("    if host:match('^10%%.') or host:match('^127%%.') or host:match('^169%%.254%%.') or host:match('^192%%.168%%.') then return false end")
+    ln("    if host:match('^172%%.1[6-9]%%.') or host:match('^172%%.2%%d%%.') or host:match('^172%%.3[0-1]%%.') then return false end")
+    ln("    return true")
+    ln("end")
+    ln("local function failRemoteImage(player, url)")
+    ln("    triggerClientEvent(player, 'expui:receiveRemoteImage', player, url, false, nil)")
+    ln("end")
     ln("addEvent(\"expui:requestImage\", true)")
     ln("addEventHandler(\"expui:requestImage\", root, function(url)")
     ln("    local player = client")
     ln("    if not player or not isElement(player) then return end")
+    ln("    if not isSafeUrl(url) then failRemoteImage(player, url); return end")
     ln("    fetchRemote(url, function(data, errno)")
     ln("        if type(errno)==\"table\" then errno=errno.statusCode or -1 end")
-    ln("        if errno==0 and data and #data>0 then")
+    ln("        if errno==0 and data and #data>0 and #data<=MAX_REMOTE_IMAGE_BYTES then")
     ln("            local ext=\"png\"")
     ln("            local h=data:sub(1,8)")
     ln("            if h:sub(1,3)==\"\\255\\216\\255\" then ext=\"jpg\"")
     ln("            elseif h:sub(1,2)==\"BM\" then ext=\"bmp\" end")
     ln("            triggerLatentClientEvent(player,\"expui:receiveRemoteImage\",1000000,false,player,url,data,ext)")
     ln("        else")
-    ln("            triggerClientEvent(player,\"expui:receiveRemoteImage\",player,url,false,nil)")
+    ln("            failRemoteImage(player, url)")
     ln("        end")
     ln("    end)")
     ln("end)")
     return table.concat(L, "\n")
 end
 
-local function generateFullExportCode()
+function generateFullExportCode()
     ensureExport()
 
     local L = {}
@@ -1594,11 +2980,12 @@ local function generateFullExportCode()
     if hasHttpImages then
         ln("local _remTex = {}")
         ln("local _remPending = {}")
+        ln("local _remIndex = 0")
         ln("addEvent(\"expui:receiveRemoteImage\", true)")
         ln("addEventHandler(\"expui:receiveRemoteImage\", root, function(url, data, ext)")
         ln("    if not data then _remPending[url]=nil; return end")
-        ln("    local idx = tostring(#_remTex+1)")
-        ln("    local tmp = \"_ri\"..idx..\".\"..( ext or \"png\")")
+        ln("    _remIndex = _remIndex + 1")
+        ln("    local tmp = \"_ri\"..tostring(_remIndex)..\".\"..( ext or \"png\")")
         ln("    local f = fileCreate(tmp)")
         ln("    if f then fileWrite(f,data); fileClose(f)")
         ln("        local tex = dxCreateTexture(tmp,\"argb\",true,\"clamp\")")
@@ -1639,129 +3026,19 @@ local function generateFullExportCode()
         ln("")
     end
 
+    appendExportIconRuntime(L)
+
     ln("local uiElements = {")
     if #editor.elements == 0 then ln("    -- Henuz eleman yok.")
     else for _, el in ipairs(editor.elements) do ln(createElementCode(el)) end end
     ln("}")
     ln("")
-    ln("local function rgba(c) return tocolor(c[1],c[2],c[3],c[4] or 255) end")
-    ln("local function hasColor(c) return type(c)==\"table\" and (c[4] or 255)>0 end")
-    ln("")
-    ln("local function isCursorOnRect(x,y,w,h)")
-    ln("    if not isCursorShowing() then return false end")
-    ln("    local cx,cy=getCursorPosition(); if not cx then return false end")
-    ln("    cx,cy=cx*sx,cy*sy")
-    ln("    return cx>=x and cx<=x+w and cy>=y and cy<=y+h")
-    ln("end")
-    ln("")
-    if hasCustomFonts then
-        ln("local function _init() sx,sy=guiGetScreenSize(); scaleX,scaleY=sx/_cw,sy/_ch; _scale=math.min(scaleX,scaleY); _offX=(sx-_cw*_scale)/2; _offY=(sy-_ch*_scale)/2; loadFonts() end")
-        ln("addEventHandler(\"onClientResourceStart\",resourceRoot,_init)")
-    else
-        ln("local function _res() sx,sy=guiGetScreenSize(); scaleX,scaleY=sx/_cw,sy/_ch; _scale=math.min(scaleX,scaleY); _offX=(sx-_cw*_scale)/2; _offY=(sy-_ch*_scale)/2 end")
-        ln("addEventHandler(\"onClientResourceStart\",resourceRoot,_res)")
-    end
-    ln("")
-    ln("local function dxDrawRounded(id,x,y,w,h,radius,color,postGUI)")
-    ln("    w=math.max(1,math.floor(w+0.5)); h=math.max(1,math.floor(h+0.5))")
-    ln("    radius=math.min(math.floor((radius or 0)+0.5), math.floor(math.min(w,h)/2))")
-    ln("    if radius<=0 then dxDrawRectangle(x,y,w,h,color,postGUI or false); return end")
-    ln("    rounded[id]=rounded[id] or {}; rounded[id][w]=rounded[id][w] or {}; rounded[id][w][h]=rounded[id][w][h] or {}")
-    ln("    if not rounded[id][w][h][radius] or not isElement(rounded[id][w][h][radius]) then")
-    ln("        local p=string.format('<svg width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\"><rect width=\"%d\" height=\"%d\" rx=\"%d\" fill=\"#FFF\"/></svg>',w,h,w,h,w,h,radius)")
-    ln("        rounded[id][w][h][radius]=svgCreate(w,h,p)")
-    ln("    end")
-    ln("    if rounded[id][w][h][radius] then dxDrawImage(x,y,w,h,rounded[id][w][h][radius],0,0,0,color,postGUI or false) end")
-    ln("end")
-    ln("")
-    ln("local function dxDrawCircle(id,x,y,w,h,color,postGUI)")
-    ln("    w=math.max(1,math.floor(w+0.5)); h=math.max(1,math.floor(h+0.5))")
-    ln("    local key=w..'_'..h")
-    ln("    circles[id]=circles[id] or {}")
-    ln("    if not circles[id][key] or not isElement(circles[id][key]) then")
-    ln("        local p=string.format('<svg width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\"><ellipse cx=\"%.1f\" cy=\"%.1f\" rx=\"%.1f\" ry=\"%.1f\" fill=\"#FFF\"/></svg>',w,h,w,h,w/2,h/2,w/2,h/2)")
-    ln("        circles[id][key]=svgCreate(w,h,p)")
-    ln("    end")
-    ln("    if circles[id][key] then dxDrawImage(x,y,w,h,circles[id][key],0,0,0,color,postGUI or false) end")
-    ln("end")
-    ln("")
-    ln("local function drawStyledText(text,left,top,right,bottom,opts)")
-    ln("    local scale=(opts.fontScale or 1)")
-
-    if hasCustomFonts then
-        ln("    local font=resolveFont(opts.font)")
-    else
-        ln("    local _bf={[\"default\"]=true,[\"default-bold\"]=true,[\"arial\"]=true,[\"bankgothic\"]=true,[\"clear\"]=true,[\"danielbd\"]=true,[\"pricedown\"]=true,[\"sans\"]=true,[\"unifont\"]=true}")
-        ln("    local font=(opts.font and _bf[opts.font]) and opts.font or 'default-bold'")
-    end
-
-    ln("    if hasColor(opts.shadowColor) then")
-    ln("        local sx2=(opts.shadowOffsetX or 1)*scaleX; local sy2=(opts.shadowOffsetY or 1)*scaleY")
-    ln("        dxDrawText(text,left+sx2,top+sy2,right+sx2,bottom+sy2,rgba(opts.shadowColor),scale,font,opts.alignX or 'left',opts.alignY or 'center',opts.clip,opts.wordBreak,false,opts.colorCoded)")
-    ln("    end")
-    ln("    dxDrawText(text,left,top,right,bottom,rgba(opts.textColor or {255,255,255,255}),scale,font,opts.alignX or 'left',opts.alignY or 'center',opts.clip,opts.wordBreak,false,opts.colorCoded)")
-    ln("end")
-    ln("")
-    ln("local function drawUiElement(el)")
-    ln("    local x,y,w,h=el.x*_scale+_offX, el.y*_scale+_offY, el.w*_scale, el.h*_scale")
-    ln("    if el.type==\"window\" then")
-    ln("        local hh=math.min(h,math.max(24*scaleY,(el.headerHeight or 40)*scaleY))")
-    ln("        local px=(el.titlePaddingX or 16)*scaleX")
-    ln("        dxDrawRectangle(x,y,w,h,rgba(el.bodyColor))")
-    ln("        dxDrawRectangle(x,y,w,hh,rgba(el.headerColor))")
-    ln("        drawStyledText(el.title,x+px,y,x+w-px,y+hh,el)")
-    ln("    elseif el.type==\"rectangle\" then")
-    ln("        dxDrawRounded(el.id,x,y,w,h,(el.radius or 0)*math.min(scaleX,scaleY),rgba(el.color))")
-    ln("    elseif el.type==\"button\" then")
-    ln("        local r=(el.radius or 0)*math.min(scaleX,scaleY)")
-    ln("        local fill=isCursorOnRect(x,y,w,h) and el.hoverColor or el.color")
-    ln("        dxDrawRounded(el.id,x,y,w,h,r,rgba(fill))")
-    ln("        drawStyledText(el.text,x+8*scaleX,y+4*scaleY,x+w-8*scaleX,y+h-4*scaleY,el)")
-    ln("    elseif el.type==\"label\" then")
-    ln("        drawStyledText(el.text,x,y,x+w,y+h,el)")
-    ln("    elseif el.type==\"image\" then")
-    ln("        local r=(el.radius or 0)*math.min(scaleX,scaleY)")
-    ln("        if el.imagePath and el.imagePath~=\"\" then")
-    ln("            local isHttp=el.imagePath:sub(1,7)==\"http://\" or el.imagePath:sub(1,8)==\"https://\"")
-    ln("            local tex")
-    if hasHttpImages then
-        ln("            if isHttp then")
-        ln("                tex=getRemoteTex(el.imagePath)")
-        ln("            else")
-        ln("                if not el._tex or not isElement(el._tex) then el._tex=dxCreateTexture(el.imagePath,'argb',true,'clamp') end")
-        ln("                tex=el._tex")
-        ln("            end")
-    else
-        ln("            if not isHttp then")
-        ln("                if not el._tex or not isElement(el._tex) then el._tex=dxCreateTexture(el.imagePath,'argb',true,'clamp') end")
-        ln("                tex=el._tex")
-        ln("            end")
-    end
-    ln("            if tex then")
-    ln("                dxDrawImage(x,y,w,h,tex,0,0,0,rgba(el.color or {255,255,255,255}))")
-    ln("            else")
-    ln("                dxDrawRounded(el.id,x,y,w,h,r,rgba(el.color or {255,255,255,255}))")
-    ln("            end")
-    ln("        end")
-    ln("    elseif el.type==\"circle\" then")
-    ln("        if (el.borderWidth or 0)>0 and hasColor(el.borderColor) then")
-    ln("            local bw=el.borderWidth*math.min(scaleX,scaleY)")
-    ln("            dxDrawCircle(el.id..'_b',x-bw,y-bw,w+bw*2,h+bw*2,rgba(el.borderColor))")
-    ln("        end")
-    ln("        dxDrawCircle(el.id,x,y,w,h,rgba(el.color))")
-    ln("    end")
-    ln("end")
-    ln("")
-    ln("local function renderCreatedUi()")
-    ln("    for _,el in ipairs(uiElements) do if el.visible~=false then drawUiElement(el) end end")
-    ln("end")
-    ln("")
-    ln("addEventHandler(\"onClientRender\", root, renderCreatedUi)")
+    appendCommonExportRuntime(L, hasCustomFonts, hasHttpImages)
 
     return table.concat(L, "\n")
 end
 
-local function escapeXmlAttr(s)
+function escapeXmlAttr(s)
     s = s:gsub("&",  "&amp;")
     s = s:gsub("\"", "&quot;")
     s = s:gsub("<",  "&lt;")
@@ -1832,8 +3109,13 @@ local function doExport(basePath)
             sourcePath = path,
         }
     end
+    local localFiles = {}
+    local usedLocalImages = getUsedRemoteImages()
+    for path in pairs(usedLocalImages) do
+        localFiles[#localFiles+1] = path
+    end
 
-    triggerLatentServerEvent("dxui:exportFiles", 2000000, localPlayer, basePath, luaCode, metaCode, fontFiles, serverCode)
+    triggerLatentServerEvent("dxui:exportFiles", 2000000, localPlayer, basePath, luaCode, metaCode, fontFiles, localFiles, serverCode)
 
     return true
 end
@@ -1887,33 +3169,80 @@ end
 
 local function drawElementPreview(layout, element)
     local cx, cy    = getScreenCursor()
-    local x,y,w,h   = canvasToScreen(layout, element.x, element.y, element.w, element.h)
-    local hovered    = cx and insideRect(cx, cy, x, y, w, h)
+    local canvasX, canvasY, canvasW, canvasH = getElementCanvasRect(element)
+    local baseX, baseY, baseW, baseH = canvasToScreen(layout, canvasX, canvasY, canvasW, canvasH)
+    local hovered = cx and insideRect(cx, cy, baseX, baseY, baseW, baseH)
+    local x, y, w, h, alphaMul = getElementAnimatedRect(element, baseX, baseY, baseW, baseH, hovered)
     local scaledR    = (element.radius or 0) * layout.canvas.scale
     local textOpts   = buildPreviewTextOptions(element, layout.canvas.scale)
+    textOpts.textColor = modulateColorAlpha(textOpts.textColor or {255,255,255,255}, alphaMul)
+    textOpts.shadowColor = modulateColorAlpha(textOpts.shadowColor, alphaMul)
 
     if element.type == "window" then
         local hh  = math.min(h, math.max(24*layout.canvas.scale, (element.headerHeight or 40)*layout.canvas.scale))
         local px2 = (element.titlePaddingX or 16) * layout.canvas.scale
-        dxDrawRectangle(x, y, w, h, rgba(element.bodyColor))
-        dxDrawRectangle(x, y, w, hh, rgba(element.headerColor))
+        dxDrawRectangle(x, y, w, h, rgba(modulateColorAlpha(element.bodyColor, alphaMul)))
+        dxDrawRectangle(x, y, w, hh, rgba(modulateColorAlpha(element.headerColor, alphaMul)))
         drawStyledText(element.title, x+px2, y, x+w-px2, y+hh, textOpts)
     elseif element.type == "rectangle" then
-        dxDrawRoundedRectangle(element.id, x, y, w, h, scaledR, rgba(element.color))
+        dxDrawRoundedRectangle(element.id, x, y, w, h, scaledR, rgba(modulateColorAlpha(element.color, alphaMul)))
     elseif element.type == "button" then
         local bc = hovered and element.hoverColor or element.color
-        dxDrawRoundedRectangle(element.id, x, y, w, h, scaledR, rgba(bc))
+        dxDrawRoundedRectangle(element.id, x, y, w, h, scaledR, rgba(modulateColorAlpha(bc, alphaMul)))
         drawStyledText(element.text, x+8*layout.canvas.scale, y+4*layout.canvas.scale, x+w-8*layout.canvas.scale, y+h-4*layout.canvas.scale, textOpts)
     elseif element.type == "label" then
         drawStyledText(element.text, x, y, x+w, y+h, textOpts)
     elseif element.type == "image" then
         local tex = element.imagePath and element.imagePath~="" and getOrLoadTexture(element.imagePath) or nil
         if tex then
-            dxDrawImage(x, y, w, h, tex, 0, 0, 0, rgba(element.color or {255,255,255,255}))
+            dxDrawImage(x, y, w, h, tex, 0, 0, 0, rgba(modulateColorAlpha(element.color or {255,255,255,255}, alphaMul)))
         else
-            dxDrawRectangle(x, y, w, h, tocolor(50,50,60,200))
-            drawOutline(x, y, w, h, tocolor(100,100,120,200), 1)
-            dxDrawText("IMAGE\n"..(element.imagePath~="" and element.imagePath or "(yol girilmedi)"), x, y, x+w, y+h, tocolor(150,150,170,220), 1, customFonts["gilroy-medium_10"], "center", "center", false, true, false)
+            dxDrawRectangle(x, y, w, h, tocolor(50,50,60,round(200 * alphaMul)))
+            drawOutline(x, y, w, h, tocolor(100,100,120,round(200 * alphaMul)), 1)
+            dxDrawText("IMAGE\n"..(element.imagePath~="" and element.imagePath or "(yol girilmedi)"), x, y, x+w, y+h, tocolor(150,150,170,round(220 * alphaMul)), 1, customFonts["gilroy-medium_10"], "center", "center", false, true, false)
+        end
+    elseif element.type == "container" then
+        dxDrawRoundedRectangle(element.id, x, y, w, h, scaledR, rgba(modulateColorAlpha(element.color, alphaMul)))
+        drawOutline(x, y, w, h, tocolor(255,255,255,round(40 * alphaMul)), 1)
+    elseif element.type == "progressbar" then
+        dxDrawRoundedRectangle(element.id .. "_bg", x, y, w, h, scaledR, rgba(modulateColorAlpha(element.color, alphaMul)))
+        local fillW = math.max(0, math.min(w, w * ((element.progress or 0) / 100)))
+        dxDrawRoundedRectangle(element.id .. "_fill", x, y, fillW, h, scaledR, rgba(modulateColorAlpha(element.progressColor or {72,199,130,255}, alphaMul)))
+        if element.text and element.text ~= "" then
+            drawStyledText(element.text, x, y, x+w, y+h, textOpts)
+        end
+    elseif element.type == "checkbox" then
+        local box = math.min(h, 22 * layout.canvas.scale)
+        dxDrawRoundedRectangle(element.id .. "_box", x, y + (h-box)/2, box, box, 4, rgba(element.boxColor or {27,31,42,230}))
+        if element.checked then
+            dxDrawText("✓", x, y + (h-box)/2, x + box, y + (h+box)/2, rgba(element.checkColor or {72,199,130,255}), 1, UI_FONT_BOLD_SM, "center", "center", false, false, false)
+        end
+        drawStyledText(element.text or "", x + box + 8, y, x+w, y+h, textOpts)
+    elseif element.type == "editbox" then
+        dxDrawRoundedRectangle(element.id .. "_eb", x, y, w, h, scaledR, rgba(element.color or {20,24,32,235}))
+        if hasVisibleColor(element.borderColor) then
+            drawOutline(x, y, w, h, rgba(element.borderColor), 1)
+        end
+        local shown = element.text ~= "" and element.text or (element.placeholder or "")
+        local colorBackup = textOpts.textColor
+        if element.text == "" then textOpts.textColor = {160,165,180,255} end
+        if element.masked and element.text and element.text ~= "" then
+            shown = string.rep("*", utfLen(element.text))
+        end
+        drawStyledText(shown, x+12, y, x+w-12, y+h, textOpts)
+        textOpts.textColor = colorBackup
+    elseif element.type == "line" then
+        dxDrawLine(x, y + h / 2, x + w, y + h / 2, rgba(element.color or {255,255,255,200}), element.thickness or math.max(1, h))
+    elseif element.type == "gradient" then
+        dxDrawGradientRect(element.id, x, y, w, h, element.color or {63,124,255,240}, element.gradientColor or {148,83,255,240}, element.gradientMode == "vertical")
+        if (element.radius or 0) > 0 then
+            drawOutline(x, y, w, h, tocolor(255,255,255,30), 1)
+        end
+    elseif element.type == "icon" then
+        local icon = getIcon(element.iconName or "save")
+        if icon then
+            local size = math.min(w, h, (element.iconSize or 24) * layout.canvas.scale)
+            dxDrawImage(x + (w - size)/2, y + (h - size)/2, size, size, icon, 0, 0, 0, rgba(element.color or {255,255,255,255}))
         end
     elseif element.type == "circle" then
         if (element.borderWidth or 0) > 0 and hasVisibleColor(element.borderColor) then
@@ -1923,7 +3252,7 @@ local function drawElementPreview(layout, element)
         dxDrawEllipse(element.id, x, y, w, h, rgba(element.color))
     end
 
-    if editor.selectedId == element.id then
+    if isElementSelected(element.id) then
         dxDrawRectangle(x, y, w, h, themeColors.selectionFill)
         drawOutline(x-1, y-1, w+2, h+2, themeColors.selection, 2)
 
@@ -2008,6 +3337,28 @@ local function drawCanvas(layout)
         if element.visible ~= false then
             drawElementPreview(layout, element)
         end
+    end
+
+    if editor.smartGuides then
+        if editor.smartGuides.x then
+            local gx = layout.canvas.x + editor.smartGuides.x * layout.canvas.scale
+            dxDrawRectangle(gx, layout.canvas.y, 1, layout.canvas.h, tocolor(88,180,255,160))
+        end
+        if editor.smartGuides.y then
+            local gy = layout.canvas.y + editor.smartGuides.y * layout.canvas.scale
+            dxDrawRectangle(layout.canvas.x, gy, layout.canvas.w, 1, tocolor(88,180,255,160))
+        end
+    end
+
+    if editor.rubberBand and editor.interaction and editor.interaction.mode == "rubber_band" then
+        local rb = editor.rubberBand
+        local rbX1 = math.min(rb.startX, rb.currentX)
+        local rbY1 = math.min(rb.startY, rb.currentY)
+        local rbX2 = math.max(rb.startX, rb.currentX)
+        local rbY2 = math.max(rb.startY, rb.currentY)
+        local sx1, sy1, sw, sh = canvasToScreen(layout, rbX1, rbY1, rbX2 - rbX1, rbY2 - rbY1)
+        dxDrawRectangle(sx1, sy1, sw, sh, tocolor(88, 180, 255, 30))
+        drawOutline(sx1, sy1, sw, sh, tocolor(88, 180, 255, 180), 1)
     end
 
     local snapLabel = editor.snapEnabled and "Snap:ON" or "Snap:OFF"
@@ -2138,7 +3489,7 @@ local function drawLayersPanel(panelX, panelY, panelW, availableHeight)
     end
 end
 
-local function drawLeftPanel(layout)
+function drawLeftPanel(layout)
     local panel = layout.left
     if not _skipPanelDraw then
         dxDrawUiRounded("left_panel", panel.x, panel.y, panel.w, panel.h, 10, themeColors.panel)
@@ -2150,18 +3501,20 @@ local function drawLeftPanel(layout)
     end
 
     local presetY = panel.y + 64
-    local pw = (panel.w - 32 - 3*4) / 4
+    local pw = (panel.w - 32 - 2*4) / 3
     for i, preset in ipairs(CANVAS_PRESETS) do
-        local px2 = panel.x + 16 + (i-1) * (pw+4)
+        local col4 = (i-1) % 3
+        local row4 = math.floor((i-1) / 3)
+        local px2 = panel.x + 16 + col4 * (pw+4)
         local active = editor.canvas.width == preset.w and editor.canvas.height == preset.h
-        drawSmallButton(px2, presetY+20, pw, 22, preset.label, "preset_"..i, active)
+        drawSmallButton(px2, presetY+20 + row4*26, pw, 22, preset.label, "preset_"..i, active)
     end
 
     local st = {normal=editor.theme.panelAlt,  hover=editor.theme.accentHover}
     local ss = {normal=editor.theme.success,   hover=editor.theme.successHover}
     local sl = {normal=editor.theme.panelAlt,  hover=editor.theme.accent}
 
-    local startY = panel.y + 110
+    local startY = panel.y + 136
     local gutter = 8
     local bw     = (panel.w - 32 - gutter) / 2
     local bh     = 38
@@ -2170,6 +3523,10 @@ local function drawLeftPanel(layout)
         {"Pencere","add_window","window"}, {"Buton","add_button","button"},
         {"Yazı","add_label","label"},     {"Dikdörtgen","add_rectangle","rectangle"},
         {"Resim","add_image","image"},    {"Daire","add_circle","circle"},
+        {"Container","add_container","container"}, {"Bar","add_progressbar","progressbar"},
+        {"Check","add_checkbox","checkbox"}, {"Edit","add_editbox","editbox"},
+        {"Çizgi","add_line","line"}, {"Gradient","add_gradient","gradient"},
+        {"İkon","add_icon","icon"},
     }
     for i, ab in ipairs(addButtons) do
         local col = (i-1) % 2
@@ -2177,28 +3534,56 @@ local function drawLeftPanel(layout)
         drawButton(panel.x+16 + col*(bw+gutter), startY + row*(bh+6), bw, bh, ab[1], ab[2], st, ab[3])
     end
 
-    local saveLoadY = startY + 3*(bh+6) + 4
+    local saveLoadY = startY + math.ceil(#addButtons / 2)*(bh+6) + 4
     drawButton(panel.x+16,           saveLoadY,      bw, bh, "Kaydet",      "save_project",   ss, "save")
     drawButton(panel.x+16+bw+gutter, saveLoadY,      bw, bh, "Yükle",       "load_project",   sl, "load")
     drawButton(panel.x+16,           saveLoadY+bh+6, bw, bh, "Lua'ya Yaz",  "export_to_file", ss, "code")
     drawButton(panel.x+16+bw+gutter, saveLoadY+bh+6, bw, bh, "Kodu Kopyala","copy_export",    st, "copy")
 
-    local shortY = saveLoadY + (bh+6)*2 + 10
+    local presetY2 = saveLoadY + (bh+6)*2 + 8
+    ensureStylePresets()
+    for i = 1, math.min(2, #editor.stylePresets) do
+        drawSmallButton(panel.x+16 + (i-1)*((panel.w-40)/2 + 8), presetY2, (panel.w-40)/2, 22, "Style "..tostring(i), "style_preset_"..i, false)
+    end
+    for i = 1, math.min(2, #editor.prefabList) do
+        drawSmallButton(panel.x+16 + (i-1)*((panel.w-40)/2 + 8), presetY2 + 26, (panel.w-40)/2, 22, "Prefab "..tostring(i), "prefab_"..i, false)
+    end
+
+    local shortY = presetY2 + 56
     local shortcutCount = 10
+    if not _skipPanelDraw then
+        dxDrawText("Şablonlar", panel.x+16, shortY-2, panel.x+panel.w-16, shortY+14, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
+    end
+    local templateBtns = {
+        {"Giriş Ekranı", "template_login"},
+        {"Bildirim", "template_notification"},
+        {"Envanter", "template_inventory"},
+        {"HUD Bar", "template_hud"},
+    }
+    local tBw = (panel.w - 32 - 4) / 2
+    for i, tb in ipairs(templateBtns) do
+        local col3 = (i-1) % 2
+        local row3 = math.floor((i-1) / 2)
+        drawSmallButton(panel.x+16 + col3*(tBw+4), shortY+16 + row3*26, tBw, 22, tb[1], tb[2], false)
+    end
+    local shortY = shortY + 16 + math.ceil(#templateBtns/2)*26 + 4
     if not _skipPanelDraw then
         dxDrawText("Kısayollar", panel.x+16, shortY, panel.x+panel.w-16, shortY+18, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
         local shortcuts = {
             "F7 / /dxui  :  Editörü aç/kapat",
             "Del          :  Seçili elemanı sil",
             "Ctrl+Z/Y   :  Geri / ileri al",
-            "Ctrl+D       :  Kopyala",
+            "Ctrl+C       :  Elemanları kopyala",
+            "Ctrl+V       :  Elemanları yapıştır",
+            "Ctrl+A       :  Tümünü seç",
+            "Ctrl+D       :  Çoğalt",
             "Ctrl+Shift+C :  Kodu Kopyala",
             "Ctrl+S       :  Kaydet",
             "Yön tuşları :  Taşı  (Shift = 10px)",
-            "Alt             :  Snap geçici kapat",
+            "Sürükle boş :  Kutu ile çoklu seç",
             "G               :  Snap aç / kapat",
             "Scroll canvas:  Zoom",
-            "Orta tuş sürükleme: Pan",
+            "Orta tuş      :  Pan",
         }
         shortcutCount = #shortcuts
         local textY = shortY + 22
@@ -2211,7 +3596,7 @@ local function drawLeftPanel(layout)
     local layerStartY = shortY + 22 + shortcutCount * 17
     drawLayersPanel(panel.x+16, layerStartY+8, panel.w-32, panel.y+panel.h-(layerStartY+20))
 end
-local function drawPropertyRow(x, y, w, property, element)
+function drawPropertyRow(x, y, w, property, element)
     if property.kind == "group" then
         local groupH = 26
         if not _skipPanelDraw then
@@ -2296,7 +3681,7 @@ local function drawPropertyRow(x, y, w, property, element)
     return rowH
 end
 
-local function drawRightPanel(layout)
+function drawRightPanel(layout)
     local panel = layout.right
 
     if not _skipPanelDraw then
@@ -2320,8 +3705,12 @@ local function drawRightPanel(layout)
     drawButton(panel.x+16+bw2+gutter2,  baseY+bh2+6,      bw2, bh2, "Bir Aşağı",   "layer_down",        sp, "back")
     drawButton(panel.x+16,              baseY+(bh2+6)*2,   bw2, bh2, "Kopyala",     "duplicate_selected",sp, "duplicate")
     drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*2,   bw2, bh2, "Sil",         "delete_selected",   dp, "trash")
+    drawButton(panel.x+16,              baseY+(bh2+6)*3,   bw2, bh2, "Grupla",      "group_selection",   sp, "layers")
+    drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*3,   bw2, bh2, "Parent Yap",  "parent_selection",  sp, "front")
+    drawButton(panel.x+16,              baseY+(bh2+6)*4,   bw2, bh2, "Stil Kopya",  "copy_style",        sp, "copy")
+    drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*4,   bw2, bh2, "Stil Yapistir","paste_style",      sp, "duplicate")
 
-    local alignY = baseY + (bh2+6)*3 + 4
+    local alignY = baseY + (bh2+6)*5 + 4
     if not _skipPanelDraw then
         dxDrawText("Hizalama:", panel.x+16, alignY, panel.x+panel.w-16, alignY+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
     end
@@ -2417,17 +3806,26 @@ local function drawRightPanel(layout)
 
         local pvW = math.max(1, round(panel.w-32))
         local pvH = math.max(1, round(previewH))
-        if not _previewCachedRT or not isElement(_previewCachedRT) or _previewCachedW ~= pvW or _previewCachedH ~= pvH then
-            if _previewCachedRT and isElement(_previewCachedRT) then destroyElement(_previewCachedRT) end
-            _previewCachedRT = dxCreateRenderTarget(pvW, pvH, true)
-            _previewCachedW = pvW; _previewCachedH = pvH
-        end
+        local needsPreviewRedraw = not _previewCachedRT or not isElement(_previewCachedRT) 
+                                or _previewCachedW ~= pvW or _previewCachedH ~= pvH
+                                or _lastPreviewCacheCode ~= editor.exportCache
+                                or _lastPreviewScroll ~= editor.previewScroll
 
-        if _previewCachedRT then
-            dxSetRenderTarget(_previewCachedRT, true)
-            dxDrawRectangle(0, 0, pvW, pvH, tocolor(8,11,16,220))
-            dxDrawText(editor.exportCache, 8, 10 - editor.previewScroll, pvW-8, totalTextH + 10, themeColors.text, 1, UI_FONT_MEDIUM_XS, "left", "top", true, false, false)
-            dxSetRenderTarget()
+        if needsPreviewRedraw then
+            if not _previewCachedRT or not isElement(_previewCachedRT) or _previewCachedW ~= pvW or _previewCachedH ~= pvH then
+                if _previewCachedRT and isElement(_previewCachedRT) then destroyElement(_previewCachedRT) end
+                _previewCachedRT = dxCreateRenderTarget(pvW, pvH, true)
+                _previewCachedW = pvW; _previewCachedH = pvH
+            end
+
+            if _previewCachedRT then
+                dxSetRenderTarget(_previewCachedRT, true)
+                dxDrawRectangle(0, 0, pvW, pvH, tocolor(8,11,16,220))
+                dxDrawText(editor.exportCache, 8, 10 - editor.previewScroll, pvW-8, totalTextH + 10, themeColors.text, 1, UI_FONT_MEDIUM_XS, "left", "top", true, false, false)
+                dxSetRenderTarget()
+            end
+            _lastPreviewCacheCode = editor.exportCache
+            _lastPreviewScroll = editor.previewScroll
         end
 
         if panelRTActive then dxSetRenderTarget(_panelRT) end
@@ -2446,30 +3844,109 @@ local function drawRightPanel(layout)
     end
 end
 
-local function findTopElementAt(cx, cy)
+function findTopElementAt(cx, cy)
     for i = #editor.elements, 1, -1 do
         local el = editor.elements[i]
-        if insideRect(cx, cy, el.x, el.y, el.w, el.h) then return el end
+        local x, y, w, h = getElementCanvasRect(el)
+        if el.visible ~= false and insideRect(cx, cy, x, y, w, h) then return el end
     end
     return nil
 end
 
-local function beginDrag(element, cx, cy)
+function beginDrag(element, cx, cy)
     saveUndoState()
-    editor.interaction = {mode="drag", elementId=element.id, offsetX=cx-element.x, offsetY=cy-element.y}
+    normalizeSelection()
+    if not isElementSelected(element.id) then
+        setSelectedElement(element.id)
+    end
+    local selected = getSelectedElements()
+    local snapshots = {}
+    for _, el in ipairs(selected) do
+        local x, y = getElementCanvasRect(el)
+        snapshots[#snapshots+1] = {id=el.id, x=x, y=y}
+    end
+    local x, y = getElementCanvasRect(element)
+    editor.interaction = {mode="drag", elementId=element.id, offsetX=cx-x, offsetY=cy-y, snapshot=snapshots}
 end
 
-local function beginResize(element, handle, cx, cy)
+function beginResize(element, handle, cx, cy)
     saveUndoState()
+    normalizeSelection()
+    local selected = getSelectedElements()
+    local snapshots = {}
+    for _, el in ipairs(selected) do
+        if not el.locked then
+            local x, y, w, h = getElementCanvasRect(el)
+            snapshots[#snapshots+1] = {id=el.id, x=x, y=y, w=w, h=h}
+        end
+    end
+    local x, y, w, h = getElementCanvasRect(element)
     editor.interaction = {
         mode="resize", elementId=element.id, handle=handle,
         startCursorX=cx, startCursorY=cy,
-        startX=element.x, startY=element.y, startW=element.w, startH=element.h,
+        startX=x, startY=y, startW=w, startH=h,
+        resizeSnapshots=snapshots,
     }
 end
 
-local function updateInteraction(layout)
-    if not editor.interaction then return end
+function resolveSmartSnap(targetId, x, y, w, h)
+    if not editor.smartSnapEnabled then
+        editor.smartGuides = {}
+        return x, y
+    end
+    local threshold = 6
+    local bestX, bestY = x, y
+    local bestDx, bestDy = threshold + 1, threshold + 1
+    editor.smartGuides = {}
+    local candidatesX = {x, x + w / 2, x + w}
+    local candidatesY = {y, y + h / 2, y + h}
+    for _, other in ipairs(editor.elements) do
+        if other.id ~= targetId and other.visible ~= false then
+            local ox, oy, ow, oh = getElementCanvasRect(other)
+            local otherX = {ox, ox + ow / 2, ox + ow}
+            local otherY = {oy, oy + oh / 2, oy + oh}
+            for ci, cv in ipairs(candidatesX) do
+                for _, ov in ipairs(otherX) do
+                    local diff = ov - cv
+                    if math.abs(diff) < math.abs(bestDx) and math.abs(diff) <= threshold then
+                        bestDx = diff
+                        if ci == 1 then bestX = x + diff elseif ci == 2 then bestX = x + diff else bestX = x + diff end
+                        editor.smartGuides.x = ov
+                    end
+                end
+            end
+            for ci, cv in ipairs(candidatesY) do
+                for _, ov in ipairs(otherY) do
+                    local diff = ov - cv
+                    if math.abs(diff) < math.abs(bestDy) and math.abs(diff) <= threshold then
+                        bestDy = diff
+                        if ci == 1 then bestY = y + diff elseif ci == 2 then bestY = y + diff else bestY = y + diff end
+                        editor.smartGuides.y = ov
+                    end
+                end
+            end
+        end
+    end
+    return bestX, bestY
+end
+
+function updateInteraction(layout)
+    if not editor.interaction then
+        editor.smartGuides = {}
+        return
+    end
+
+    if editor.interaction.mode == "rubber_band" then
+        if editor.rubberBand then
+            local cx2, cy2 = getScreenCursor()
+            if cx2 then
+                local canvasX, canvasY = screenToCanvas(layout, cx2, cy2)
+                editor.rubberBand.currentX = canvasX
+                editor.rubberBand.currentY = canvasY
+            end
+        end
+        return
+    end
 
     if editor.interaction.mode == "layer_reorder" then
         local info = editor.layersBoxInfo
@@ -2504,9 +3981,20 @@ local function updateInteraction(layout)
     if editor.interaction.mode == "drag" then
         local rawX = canvasX - editor.interaction.offsetX
         local rawY = canvasY - editor.interaction.offsetY
+        local currentX, currentY, currentW, currentH = getElementCanvasRect(element)
+        rawX, rawY = resolveSmartSnap(editor.interaction.elementId, rawX, rawY, currentW, currentH)
         if useSnap then rawX = snapToGrid(rawX, editor.canvas.grid); rawY = snapToGrid(rawY, editor.canvas.grid) end
-        element.x = clamp(round(rawX), 0, editor.canvas.width  - element.w)
-        element.y = clamp(round(rawY), 0, editor.canvas.height - element.h)
+        local newX = clamp(round(rawX), 0, editor.canvas.width  - currentW)
+        local newY = clamp(round(rawY), 0, editor.canvas.height - currentH)
+        local dxMove = newX - currentX
+        local dyMove = newY - currentY
+        local moved = {}
+        for _, item in ipairs(editor.interaction.snapshot or {}) do
+            local sel = getElementById(item.id)
+            if sel and not sel.locked then
+                moveElementWithChildren(sel, dxMove, dyMove, moved)
+            end
+        end
         markDirty(); return
     end
 
@@ -2540,11 +4028,38 @@ local function updateInteraction(layout)
         nh = editor.interaction.startH + (editor.interaction.startY - ny)
     end
 
-    element.x=nx; element.y=ny; element.w=nw; element.h=nh
+    element.w=nw; element.h=nh
+    if element.relativeW then element.wPercent = clamp((nw / editor.canvas.width) * 100, 1, 100) end
+    if element.relativeH then element.hPercent = clamp((nh / editor.canvas.height) * 100, 1, 100) end
+    setElementCanvasPosition(element, nx, ny)
+    normalizeElementLayout(element)
+
+    local deltaX = nx - editor.interaction.startX
+    local deltaY = ny - editor.interaction.startY
+    local deltaW = nw - editor.interaction.startW
+    local deltaH = nh - editor.interaction.startH
+    local snapshots = editor.interaction.resizeSnapshots
+    if snapshots then
+        for _, snap in ipairs(snapshots) do
+            if snap.id ~= element.id then
+                local sel = getElementById(snap.id)
+                if sel then
+                    local nextW = clamp(round(snap.w + deltaW), minSize, editor.canvas.width)
+                    local nextH = clamp(round(snap.h + deltaH), minSize, editor.canvas.height)
+                    sel.w = nextW
+                    sel.h = nextH
+                    if sel.relativeW then sel.wPercent = clamp((nextW / editor.canvas.width) * 100, 1, 100) end
+                    if sel.relativeH then sel.hPercent = clamp((nextH / editor.canvas.height) * 100, 1, 100) end
+                    setElementCanvasPosition(sel, snap.x + deltaX, snap.y + deltaY)
+                    normalizeElementLayout(sel)
+                end
+            end
+        end
+    end
     markDirty()
 end
 
-local function detectPanelHover(layout)
+function detectPanelHover(layout)
     local cx, cy = getScreenCursor()
     if not cx then return "" end
     for i = #editor.hotboxes, 1, -1 do
@@ -2562,7 +4077,7 @@ local function detectPanelHover(layout)
     return ""
 end
 
-local function renderEditor()
+function renderEditor()
     if not editor.open then return end
     _lastFrameTime = getTickCount()
     refreshFrameCache()
@@ -2571,6 +4086,12 @@ local function renderEditor()
     editor.hotboxes = {}
 
     local sw, sh = layout.screenW, layout.screenH
+
+    if editor.previewMode then
+        dxDrawRectangle(0, 0, sw, sh, themeColors.overlay)
+        drawCanvas(layout)
+        return
+    end
 
     if not _panelRT or not isElement(_panelRT) or _panelRTW ~= sw or _panelRTH ~= sh then
         if _panelRT and isElement(_panelRT) then destroyElement(_panelRT) end
@@ -2597,11 +4118,12 @@ local function renderEditor()
         dxSetBlendMode("blend")
         dxSetRenderTarget()
         editor.panelDirty = false
+        _cachedHotboxes = {}
+        for i, hb in ipairs(editor.hotboxes) do _cachedHotboxes[i] = hb end
     else
-        _skipPanelDraw = true
-        drawLeftPanel(layout)
-        drawRightPanel(layout)
-        drawColorPicker(sw, sh)
+        if _cachedHotboxes then
+            editor.hotboxes = _cachedHotboxes
+        end
     end
 
     dxDrawRectangle(0, 0, sw, sh, themeColors.overlay)
@@ -2773,7 +4295,86 @@ local function renderEditor()
     end
 end
 
-local function handleAction(action)
+local TEMPLATES = {
+    login = {
+        {type="rectangle", id="login_bg", x=0, y=0, w=1280, h=720, color={12,15,22,255}, radius=0, anchorX="left", anchorY="top"},
+        {type="rectangle", id="login_panel", x=440, y=110, w=400, h=500, color={22,26,36,245}, radius=24, anchorX="left", anchorY="top"},
+        {type="label", id="login_title", x=520, y=140, w=240, h=50, text="Giriş Yap", textColor={255,255,255,255}, fontScale=1.6, font="gilroy-bold", alignX="center", alignY="center"},
+        {type="label", id="login_subtitle", x=490, y=190, w=300, h=30, text="Hesabınıza giriş yapın", textColor={140,145,165,255}, fontScale=0.9, font="gilroy-medium", alignX="center", alignY="center"},
+        {type="editbox", id="login_user", x=480, y=250, w=320, h=46, text="", placeholder="Kullanıcı adı...", color={16,19,28,240}, borderColor={63,124,255,120}, textColor={255,255,255,255}, font="gilroy-medium", radius=12},
+        {type="editbox", id="login_pass", x=480, y=310, w=320, h=46, text="", placeholder="Şifre...", color={16,19,28,240}, borderColor={63,124,255,120}, textColor={255,255,255,255}, font="gilroy-medium", radius=12, masked=true},
+        {type="button", id="login_btn", x=480, y=390, w=320, h=52, text="Giriş Yap", color={63,124,255,240}, hoverColor={92,150,255,250}, textColor={255,255,255,255}, font="gilroy-bold", fontScale=1.1, radius=14, alignX="center", alignY="center"},
+        {type="button", id="register_btn", x=480, y=456, w=320, h=44, text="Kayıt Ol", color={32,37,50,230}, hoverColor={42,48,65,240}, textColor={160,170,200,255}, font="gilroy-medium", fontScale=0.95, radius=12, alignX="center", alignY="center"},
+        {type="line", id="login_divider", x=500, y=520, w=280, h=2, color={60,65,85,120}, thickness=1},
+        {type="label", id="login_footer", x=480, y=540, w=320, h=30, text="© 2026 Server Adı", textColor={80,85,105,200}, fontScale=0.75, font="gilroy-light", alignX="center", alignY="center"},
+    },
+    notification = {
+        {type="rectangle", id="notif_bg", x=440, y=20, w=400, h=90, color={22,28,42,240}, radius=16, anchorX="left", anchorY="top",
+            animationType="slide-down", animationTrigger="auto", animationDuration=600, animationIntensity=30},
+        {type="rectangle", id="notif_accent", x=440, y=20, w=5, h=90, color={72,199,130,255}, radius=3, anchorX="left", anchorY="top"},
+        {type="icon", id="notif_icon", x=460, y=38, w=36, h=36, iconName="save", color={72,199,130,255}, iconSize=28},
+        {type="label", id="notif_title", x=506, y=32, w=300, h=26, text="Başarılı!", textColor={255,255,255,255}, fontScale=1.1, font="gilroy-bold", alignX="left", alignY="center"},
+        {type="label", id="notif_desc", x=506, y=60, w=310, h=22, text="İşleminiz başarıyla tamamlandı.", textColor={160,170,200,255}, fontScale=0.85, font="gilroy-medium", alignX="left", alignY="center"},
+    },
+    inventory = {
+        {type="rectangle", id="inv_bg", x=240, y=60, w=800, h=600, color={14,17,24,250}, radius=20, anchorX="left", anchorY="top"},
+        {type="rectangle", id="inv_header", x=240, y=60, w=800, h=56, color={22,28,42,250}, radius=0, anchorX="left", anchorY="top"},
+        {type="label", id="inv_title", x=270, y=60, w=300, h=56, text="Envanter", textColor={255,255,255,255}, fontScale=1.2, font="gilroy-bold", alignX="left", alignY="center"},
+        {type="rectangle", id="inv_slot1", x=268, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot2", x=360, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot3", x=452, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot4", x=544, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot5", x=636, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot6", x=728, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot7", x=820, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_slot8", x=912, y=140, w=80, h=80, color={28,34,50,230}, radius=12},
+        {type="rectangle", id="inv_detail_bg", x=268, y=500, w=744, h=130, color={22,28,42,230}, radius=14},
+        {type="label", id="inv_item_name", x=288, y=510, w=300, h=30, text="Seçili Eşya Adı", textColor={255,255,255,255}, fontScale=1.05, font="gilroy-bold", alignX="left", alignY="center"},
+        {type="label", id="inv_item_desc", x=288, y=540, w=700, h=30, text="Eşyanın açıklaması burada yer alacak.", textColor={140,150,175,255}, fontScale=0.85, font="gilroy-medium", alignX="left", alignY="center"},
+        {type="button", id="inv_use_btn", x=850, y=570, w=140, h=40, text="Kullan", color={63,124,255,240}, hoverColor={92,150,255,250}, textColor={255,255,255,255}, radius=10, font="gilroy-bold", alignX="center", alignY="center"},
+    },
+    hud = {
+        {type="rectangle", id="hud_hp_bg", x=20, y=656, w=260, h=24, color={18,22,32,200}, radius=8, anchorX="left", anchorY="top"},
+        {type="progressbar", id="hud_hp_bar", x=20, y=656, w=260, h=24, progress=78, color={18,22,32,0}, progressColor={220,60,60,230}, textColor={255,255,255,255}, text="78 HP", radius=8, fontScale=0.8, font="gilroy-bold", alignX="center"},
+        {type="rectangle", id="hud_armor_bg", x=20, y=688, w=260, h=24, color={18,22,32,200}, radius=8, anchorX="left", anchorY="top"},
+        {type="progressbar", id="hud_armor_bar", x=20, y=688, w=260, h=24, progress=45, color={18,22,32,0}, progressColor={63,124,255,220}, textColor={255,255,255,255}, text="45 Armor", radius=8, fontScale=0.8, font="gilroy-bold", alignX="center"},
+        {type="rectangle", id="hud_money_bg", x=1060, y=20, w=200, h=40, color={18,22,32,200}, radius=10, anchorX="left", anchorY="top"},
+        {type="label", id="hud_money_label", x=1070, y=20, w=180, h=40, text="$125,000", textColor={72,199,130,255}, fontScale=1.2, font="gilroy-bold", alignX="right", alignY="center"},
+        {type="icon", id="hud_weapon_icon", x=1200, y=654, w=48, h=48, iconName="front", color={255,255,255,200}, iconSize=36},
+        {type="label", id="hud_ammo", x=1140, y=660, w=60, h=36, text="30/120", textColor={255,255,255,220}, fontScale=0.9, font="gilroy-bold", alignX="right", alignY="center"},
+    },
+}
+
+function spawnTemplate(name)
+    local template = TEMPLATES[name]
+    if not template then return end
+    saveUndoState()
+    local created = {}
+    for _, item in ipairs(template) do
+        local el = createDefaultElement(item.type)
+        for key, value in pairs(item) do
+            if key ~= "type" then
+                if type(value) == "table" then
+                    el[key] = {}
+                    for ii = 1, #value do el[key][ii] = value[ii] end
+                else
+                    el[key] = value
+                end
+            end
+        end
+        el.id = item.id or el.id
+        table.insert(editor.elements, el)
+        created[#created+1] = el.id
+    end
+    if #created > 0 then
+        setSelection(created, created[#created])
+    end
+    updateAssetLibrary()
+    markDirty()
+    outputChatBox("[DX UI Creator] Sablon yuklendi: " .. name .. " (" .. #created .. " eleman)", 115,191,136,true)
+end
+
+function handleAction(action)
     if editor.activeInput and not commitActiveInput() then return end
 
     if     action == "add_window"        then addElement("window")
@@ -2781,6 +4382,13 @@ local function handleAction(action)
     elseif action == "add_label"         then addElement("label")
     elseif action == "add_rectangle"     then addElement("rectangle")
     elseif action == "add_image"         then addElement("image")
+    elseif action == "add_container"     then addElement("container")
+    elseif action == "add_progressbar"   then addElement("progressbar")
+    elseif action == "add_checkbox"      then addElement("checkbox")
+    elseif action == "add_editbox"       then addElement("editbox")
+    elseif action == "add_line"          then addElement("line")
+    elseif action == "add_gradient"      then addElement("gradient")
+    elseif action == "add_icon"          then addElement("icon")
     elseif action == "add_circle"        then addElement("circle")
     elseif action == "bring_front"       then moveSelectedLayer("front")
     elseif action == "send_back"         then moveSelectedLayer("back")
@@ -2798,6 +4406,18 @@ local function handleAction(action)
     elseif action == "align_top"         then alignSelected("top")
     elseif action == "align_centerY"     then alignSelected("centerY")
     elseif action == "align_bottom"      then alignSelected("bottom")
+    elseif action == "distribute_x"      then distributeSelection("x")
+    elseif action == "distribute_y"      then distributeSelection("y")
+    elseif action == "same_width"        then applySameSize("w")
+    elseif action == "same_height"       then applySameSize("h")
+    elseif action == "group_selection"   then groupSelection()
+    elseif action == "ungroup_selection" then ungroupSelection()
+    elseif action == "parent_selection"  then parentSelectionToPrimary()
+    elseif action == "clear_parent"      then clearParentFromSelection()
+    elseif action == "copy_style"        then copySelectedStyle()
+    elseif action == "paste_style"       then pasteSelectedStyle()
+    elseif action == "preview_mode"      then editor.previewMode = not editor.previewMode; editor.panelDirty = true
+    elseif action == "save_prefab"       then savePrefabFromSelection()
     elseif action:sub(1,7) == "preset_" then
         local i = tonumber(action:sub(8))
         local preset = CANVAS_PRESETS[i]
@@ -2806,14 +4426,29 @@ local function handleAction(action)
             editor.canvas.width  = preset.w
             editor.canvas.height = preset.h
             for _, el in ipairs(editor.elements) do
-                el.w = math.min(el.w, preset.w)
-                el.h = math.min(el.h, preset.h)
-                el.x = clamp(el.x, 0, math.max(0, preset.w - el.w))
-                el.y = clamp(el.y, 0, math.max(0, preset.h - el.h))
+                if not el.relativeW and el.dockX ~= "fill" then
+                    el.w = math.min(el.w, preset.w)
+                    el.x = clamp(el.x, 0, math.max(0, preset.w - el.w))
+                end
+                if not el.relativeH and el.dockY ~= "fill" then
+                    el.h = math.min(el.h, preset.h)
+                    el.y = clamp(el.y, 0, math.max(0, preset.h - el.h))
+                end
+                if el.dockX == "fill" then el.x = clamp(el.x, 0, math.max(0, preset.w - 20)) end
+                if el.dockY == "fill" then el.y = clamp(el.y, 0, math.max(0, preset.h - 20)) end
+                normalizeElementLayout(el)
             end
             markDirty()
             outputChatBox("[DX UI Creator] Canvas boyutu: "..preset.label, 75,144,255,true)
         end
+    elseif action:sub(1,13) == "style_preset_" then
+        applyStylePreset(tonumber(action:sub(14)))
+    elseif action:sub(1,7) == "prefab_" then
+        spawnPrefab(tonumber(action:sub(8)))
+    elseif action == "template_login" then spawnTemplate("login")
+    elseif action == "template_notification" then spawnTemplate("notification")
+    elseif action == "template_inventory" then spawnTemplate("inventory")
+    elseif action == "template_hud" then spawnTemplate("hud")
     elseif action == "copy_export" then
         ensureExport()
         local copied = type(setClipboard)=="function" and setClipboard(editor.exportCache) ~= false
@@ -2822,11 +4457,17 @@ local function handleAction(action)
     end
 end
 
-local function toggleEditor()
+function toggleEditor()
     editor.open = not editor.open
-    if not editor.open then editor.interaction=nil; editor.activeInput=nil; editor.colorPicker=nil end
+    if not editor.open then editor.interaction=nil; editor.activeInput=nil; editor.colorPicker=nil; editor.rubberBand=nil end
     showCursor(editor.open)
-    showChat(not isChatVisible())
+    if editor.open then
+        editor.wasChatVisible = isChatVisible()
+        showChat(false)
+    else
+        showChat(editor.wasChatVisible == true)
+        editor.wasChatVisible = nil
+    end
 end
 
 addEventHandler("onClientClick", root, function(button, state, absoluteX, absoluteY)
@@ -2892,6 +4533,39 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
             end
             editor.interaction = nil; return
         end
+        if editor.interaction and editor.interaction.mode == "rubber_band" then
+            if editor.rubberBand then
+                local rb = editor.rubberBand
+                local rbX1 = math.min(rb.startX, rb.currentX)
+                local rbY1 = math.min(rb.startY, rb.currentY)
+                local rbX2 = math.max(rb.startX, rb.currentX)
+                local rbY2 = math.max(rb.startY, rb.currentY)
+                local rbW = rbX2 - rbX1
+                local rbH = rbY2 - rbY1
+                if rbW > 3 or rbH > 3 then
+                    local hitIds = {}
+                    for _, el in ipairs(editor.elements) do
+                        if el.visible ~= false then
+                            local elX, elY, elW, elH = getElementCanvasRect(el)
+                            local elX2 = elX + elW
+                            local elY2 = elY + elH
+                            if elX < rbX2 and elX2 > rbX1 and elY < rbY2 and elY2 > rbY1 then
+                                hitIds[#hitIds+1] = el.id
+                            end
+                        end
+                    end
+                    if #hitIds > 0 then
+                        if rb.ctrl then
+                            for _, id in ipairs(hitIds) do addToSelection(id, false) end
+                        else
+                            setSelection(hitIds, hitIds[#hitIds])
+                        end
+                    end
+                end
+                editor.rubberBand = nil
+            end
+            editor.interaction = nil; return
+        end
         editor.interaction = nil; return
     end
 
@@ -2904,7 +4578,41 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
                 local el = getSelectedElement()
                 if el and el.id == dd.elementId then
                     saveUndoState()
+                    local oldX, oldY, oldW, oldH = getElementCanvasRect(el)
                     el[dd.key] = dd.options[clickIdx]
+                    if dd.key == "anchorX" or dd.key == "anchorY" then
+                        setElementCanvasPosition(el, oldX, oldY)
+                    elseif dd.key == "dockX" then
+                        if el.dockX == "fill" then
+                            el.anchorX = "left"
+                            el.x = oldX
+                            el.dockPaddingRight = clamp(editor.canvas.width - oldX - oldW, 0, editor.canvas.width)
+                        else
+                            el.w = oldW
+                            setElementCanvasPosition(el, oldX, oldY)
+                        end
+                    elseif dd.key == "dockY" then
+                        if el.dockY == "fill" then
+                            el.anchorY = "top"
+                            el.y = oldY
+                            el.dockPaddingBottom = clamp(editor.canvas.height - oldY - oldH, 0, editor.canvas.height)
+                        else
+                            el.h = oldH
+                            setElementCanvasPosition(el, oldX, oldY)
+                        end
+                    elseif dd.key == "relativeW" then
+                        if el.relativeW then
+                            el.wPercent = clamp((oldW / editor.canvas.width) * 100, 1, 100)
+                        else
+                            el.w = oldW
+                        end
+                    elseif dd.key == "relativeH" then
+                        if el.relativeH then
+                            el.hPercent = clamp((oldH / editor.canvas.height) * 100, 1, 100)
+                        else
+                            el.h = oldH
+                        end
+                    end
                     markDirty()
                 end
             end
@@ -2930,6 +4638,13 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
                         setClipboard(hb.data.hex)
                         outputChatBox("[DX UI Creator] Hex kopyalandi: "..hb.data.hex, 75,144,255,true)
                     end
+                    return
+                elseif hb.kind == "recent_color" then
+                    editor.colorPicker.r = hb.data.r
+                    editor.colorPicker.g = hb.data.g
+                    editor.colorPicker.b = hb.data.b
+                    editor.colorPicker.a = hb.data.a
+                    commitColorPicker()
                     return
                 elseif hb.kind == "color_picker_bg" then
                     return
@@ -2957,7 +4672,12 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
                 end
                 return
             elseif hb.kind == "layer" then
-                setSelectedElement(hb.data.id)
+                local ctrlDown = getKeyState("lctrl") or getKeyState("rctrl")
+                if ctrlDown then
+                    if isElementSelected(hb.data.id) then removeFromSelection(hb.data.id) else addToSelection(hb.data.id, true) end
+                else
+                    setSelectedElement(hb.data.id)
+                end
                 editor.interaction = {mode="layer_reorder", elementId=hb.data.id, targetSlot=0}
                 return
             elseif hb.kind == "property" then
@@ -2966,8 +4686,8 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
                 _previewDrag = { lastY = absoluteY }
                 return
             elseif hb.kind == "handle" then
-                local sel = getSelectedElement()
-                if sel and sel.id == hb.data.id and not sel.locked then
+                local sel = getElementById(hb.data.id)
+                if sel and isElementSelected(sel.id) and not sel.locked then
                     local cx2, cy2 = screenToCanvas(layout, absoluteX, absoluteY)
                     beginResize(sel, hb.data.handle, cx2, cy2); return
                 end
@@ -2980,16 +4700,27 @@ addEventHandler("onClientClick", root, function(button, state, absoluteX, absolu
     if insideRect(absoluteX, absoluteY, layout.canvas.x, layout.canvas.y, layout.canvas.w, layout.canvas.h) then
         local cx2, cy2 = screenToCanvas(layout, absoluteX, absoluteY)
         local el = findTopElementAt(cx2, cy2)
+        local ctrlDown = getKeyState("lctrl") or getKeyState("rctrl")
         if el then
-            setSelectedElement(el.id)
+            if ctrlDown then
+                if isElementSelected(el.id) then removeFromSelection(el.id) else addToSelection(el.id, true) end
+            else
+                if not isElementSelected(el.id) then
+                    setSelectedElement(el.id)
+                else
+                    editor.selectedId = el.id
+                end
+            end
             if not el.locked then beginDrag(el, cx2, cy2) end
         else
-            setSelectedElement(nil)
+            if not ctrlDown then clearSelection() end
+            editor.rubberBand = {startX = cx2, startY = cy2, currentX = cx2, currentY = cy2, ctrl = ctrlDown}
+            editor.interaction = {mode = "rubber_band"}
         end
         return
     end
 
-    setSelectedElement(nil)
+    clearSelection()
 end)
 
 addEventHandler("onClientKey", root, function(button, press)
@@ -3172,11 +4903,24 @@ addEventHandler("onClientKey", root, function(button, press)
     elseif ctrl and button=="z" then undo()
     elseif ctrl and button=="y" then redo()
     elseif ctrl and button=="d" then duplicateSelected()
+    elseif ctrl and shift and button=="g" then groupSelection()
+    elseif ctrl and shift and button=="u" then ungroupSelection()
+    elseif ctrl and shift and button=="s" then copySelectedStyle()
+    elseif ctrl and shift and button=="v" then pasteSelectedStyle()
     elseif ctrl and shift and button=="c" then handleAction("copy_export")
+    elseif ctrl and button=="c" then copySelectedElements()
+    elseif ctrl and button=="v" then pasteClipboardElements()
+    elseif ctrl and button=="a" then
+        local allIds = {}
+        for _, el in ipairs(editor.elements) do allIds[#allIds+1] = el.id end
+        if #allIds > 0 then setSelection(allIds, allIds[#allIds]) end
     elseif ctrl and button=="s" then saveToFile()
     elseif button == "g" then
         editor.snapEnabled = not editor.snapEnabled
         outputChatBox("[DX UI Creator] Snap-to-grid: "..(editor.snapEnabled and "AÇIK" or "KAPALI"), 75,144,255,true)
+    elseif button == "p" then
+        editor.previewMode = not editor.previewMode
+        editor.panelDirty = true
     elseif button == "escape" then toggleEditor()
     end
 end)
@@ -3235,6 +4979,8 @@ end)
 
 addEventHandler("onClientResourceStart", resourceRoot, function()
     loadCustomFonts()
+    ensureStylePresets()
+    loadPrefabsFromFile()
     local loaded, total = 0, 0
     for _, fd in ipairs(CUSTOM_FONT_DEFS) do
         total = total + 1
@@ -3243,26 +4989,25 @@ addEventHandler("onClientResourceStart", resourceRoot, function()
     outputChatBox("[DX UI Creator] Fontlar: " .. loaded .. "/" .. total .. " yuklendi.", 115, 191, 136, true)
     refreshUiFonts()
     cacheThemeColors()
+    updateAssetLibrary()
     generateExportCode()
     local _lastAutoSaveHash = ""
     setTimer(function()
         if #editor.elements > 0 then
-            local hash = tostring(#editor.elements) .. "_" .. tostring(editor.nextId)
-            for _, el in ipairs(editor.elements) do
-                hash = hash .. el.id .. tostring(el.x) .. tostring(el.y) .. tostring(el.w) .. tostring(el.h)
-            end
+            local hash = buildProjectStateHash()
             if hash ~= _lastAutoSaveHash then
                 _lastAutoSaveHash = hash
                 saveToFile()
                 outputChatBox("[DX UI Creator] Otomatik kaydedildi.", 115,191,136,true)
             end
         end
-    end, 120000, 0)
+    end, 90000, 0)
     outputChatBox("[DX UI Creator] F7 ile aç. Ctrl+Z geri al, G snap, Scroll zoom, Ctrl+S kaydet.", 75,144,255,true)
 end)
 
 addEventHandler("onClientResourceStop", resourceRoot, function()
     if #editor.elements > 0 then saveToFile() end
+    savePrefabsToFile()
     destroyRoundedCache()
     if _panelRT and isElement(_panelRT) then destroyElement(_panelRT) end
     _panelRT = nil

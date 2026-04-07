@@ -1,30 +1,13 @@
-# DX UI Creator
-
-MTA:SA icin oyun ici calisan basit bir `dx` arayuz olusturucusudur.
-
-## Kullanim
-
-- Resource'u baslat.
-- `F7` veya `/dxui` ile editoru ac.
-- Soldan `window`, `button`, `label` ve `rectangle` ekle.
-- Canvas uzerinde elemani sec, surukle, koselerinden boyutlandir.
-- Sag panelden degerleri duzenle.
-- `rectangle` ve `button` icin `radius` vererek SVG rounded gorunum olustur.
-- `font`, `align`, `clip`, `wordBreak`, `colorCoded`, `shadow` gibi text ayarlarini kullan.
-- `Copy Code` ile uretilen Lua kodunu panoya kopyala.
-
-## Kisayollar
-
-- `Delete`: secili elemani sil
-- `Ctrl + D`: secili elemani kopyala
-- `Ctrl + C`: export kodunu panoya kopyala
-- `Yon tuslari`: elemani hareket ettir
-- `Shift + Yon tuslari`: 10 px hareket ettir
-- `Mouse Wheel`: inspector alaninda ozellikleri kaydir
-
-## Notlar
-
-- Export ciktisi, `1280x720` tasarim tabanina gore `scaleX/scaleY` ile uretilir.
-- Export icinde SVG tabanli `dxDrawRoundedRectangle` helper'i otomatik uretilir.
-- Font alaninda `default`, `default-bold`, `clear`, `arial`, `sans`, `pricedown`, `bankgothic`, `diploma`, `beckett` secenekleri kullanilabilir.
-- Bu ilk surum; elemanlar client tarafinda bellekte tutulur ve otomatik dosyaya kaydetmez.
+# dx ui creator
+vibe coding ile yaptigim mta sa dx ui creator projesi
+mta icinde arayuz tasarlarken fps dusuren o agir shaderlar yerine dogrudan svg pathleri kullanarak cizim yapiyorum boylece oyun icinde fivem tarzi kaliteli ui yapabiliyorsunuz hem de piksellesme olmuyor
+zero gc mantigiyla kodladim o yuzden ram sisirip drop falan yedirtmez pürüzsüz calisir
+**ozellikleri falan:**
+- saglam fps optimizasyonu
+- glassy ve neon tasarimlara uygun
+- sub pixel text olaylari ve svg gradient
+- tiklama surukleme gibi eventler falan
+**nasil kullanilir:**
+- zip olarak indirip mods/deathmatch/resources icine atin
+- konsoldan start dx-ui-creator yazin 
+sunucudaki telefon scoreboard veya diger ui islerinde bunu alt yapi olarak kullanabilirsiniz iyi oyunlar
