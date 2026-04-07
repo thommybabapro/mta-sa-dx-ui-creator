@@ -2786,7 +2786,7 @@ local function appendCommonExportRuntime(L, hasCustomFonts, hasHttpImages)
     ln("        local t=activeInput.text or ''")
     ln("        if #t > 0 then")
     ln("            local u=t:gsub('[\\128-\\191]', '')")
-    ln("            if #u>0 then activeInput.text=delChar(t) end") -- Need a better utf8 delete, but string.sub works for standard
+    ln("            if #u>0 then activeInput.text=delChar(t) end") 
     ln("        end")
     ln("    end")
     ln("end)")
