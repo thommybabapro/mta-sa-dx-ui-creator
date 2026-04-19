@@ -52,28 +52,33 @@ local editor = {
     tooltip = nil,
     tooltipTime = 0,
     recentColors = {},
+    rightPanelTab = "design",  -- "design", "code"
     theme = {
-        overlay      = {10, 12, 18,  200},
-        panel        = {20, 22, 30,  220},
-        panelSoft    = {32, 35, 45,  225},
-        panelAlt     = {42, 46, 60,  230},
-        panelBorder  = {50, 50, 62,  120},
-        text         = {240,240,248, 255},
-        muted        = {130,135,155, 255},
-        accent       = {88, 140,255, 255},
-        accentHover  = {110,162,255, 255},
-        accentSoft   = {60, 110,220, 180},
-        success      = {72, 199,130, 255},
-        successHover = {92, 219,150, 255},
-        warning      = {240,180,60,  255},
-        danger       = {235,85, 85,  255},
-        dangerHover  = {255,110,110, 255},
-        canvasBg     = {24, 24, 28,  255},
-        canvasCheck1 = {28, 28, 33,  255},
-        canvasCheck2 = {22, 22, 26,  255},
-        canvasGrid   = {255,255,255, 22 },
-        selection    = {88, 180,255, 255},
-        selectionFill= {88, 180,255, 30 }
+        overlay      = {12,  12,  14,  215},
+        panel        = {28,  28,  31,  245},
+        panelSoft    = {36,  36,  40,  245},
+        panelAlt     = {44,  44,  49,  255},
+        panelHover   = {56,  56,  62,  255},
+        panelBorder  = {50,  50,  56,  80 },
+        borderSubtle = {38,  38,  42,  255},
+        text         = {229, 229, 231, 255},
+        textSecond   = {160, 160, 170, 255},
+        muted        = {100, 100, 110, 255},
+        accent       = {123, 104, 238, 255},
+        accentHover  = {149, 128, 248, 255},
+        accentActive = {99,  85,  212, 255},
+        accentSoft   = {123, 104, 238, 35 },
+        success      = {27,  196, 125, 255},
+        successHover = {54,  212, 146, 255},
+        warning      = {245, 166, 35,  255},
+        danger       = {242, 72,  34,  255},
+        dangerHover  = {255, 99,  71,  255},
+        canvasBg     = {10,  10,  12,  255},
+        canvasCheck1 = {20,  20,  23,  255},
+        canvasCheck2 = {15,  15,  17,  255},
+        canvasGrid   = {255, 255, 255, 10 },
+        selection    = {123, 104, 238, 255},
+        selectionFill= {123, 104, 238, 28 },
     }
 }
 
@@ -189,6 +194,11 @@ local _previewCachedW  = 0
 local _previewCachedH  = 0
 local _lastPreviewCacheCode = ""
 local _lastPreviewScroll = -1
+-- Canvas element render target (crisp text at any zoom level)
+local _canvasElemRT  = nil
+local _canvasElemRTW = 0
+local _canvasElemRTH = 0
+local _canvasRTMode  = false  -- true during RT draw: suppresses hover/selection overlay
 
 local COMMON_EXPORT_KEYS = {
     "visible", "locked", "parentId", "groupId",
@@ -351,6 +361,13 @@ local ICON_SVGS = {
     rectangle = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="#FFFFFF" stroke-width="2"/></svg>',
     image = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="3" width="20" height="18" rx="3" stroke="#FFFFFF" stroke-width="2"/><circle cx="8" cy="9" r="2" stroke="#FFFFFF" stroke-width="1.5"/><path d="M2 17L7 13L11 16L16 11L22 17" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     circle = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="#FFFFFF" stroke-width="2"/></svg>',
+    container = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="20" height="20" rx="3" stroke="#FFFFFF" stroke-width="2" stroke-dasharray="4 2"/><rect x="6" y="6" width="5" height="5" rx="1" fill="#FFFFFF" opacity="0.5"/><rect x="13" y="6" width="5" height="5" rx="1" fill="#FFFFFF" opacity="0.5"/><rect x="6" y="13" width="5" height="5" rx="1" fill="#FFFFFF" opacity="0.5"/></svg>',
+    progressbar = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="8" width="20" height="8" rx="4" stroke="#FFFFFF" stroke-width="2"/><rect x="4" y="10" width="11" height="4" rx="2" fill="#FFFFFF"/></svg>',
+    checkbox = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="12" height="12" rx="2" stroke="#FFFFFF" stroke-width="2"/><path d="M5.5 9L8 11.5L11 7" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="18" y1="7" x2="21" y2="7" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="21" y2="12" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/></svg>',
+    editbox = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="20" height="14" rx="3" stroke="#FFFFFF" stroke-width="2"/><line x1="6" y1="12" x2="14" y2="12" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/><line x1="14" y1="9" x2="14" y2="15" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    line = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="3" y1="12" x2="21" y2="12" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round"/><circle cx="3" cy="12" r="2" fill="#FFFFFF"/><circle cx="21" cy="12" r="2" fill="#FFFFFF"/></svg>',
+    gradient = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#FFFFFF" stop-opacity="1"/><stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.1"/></linearGradient></defs><rect x="2" y="5" width="20" height="14" rx="3" fill="url(#g1)"/><rect x="2" y="5" width="20" height="14" rx="3" stroke="#FFFFFF" stroke-width="1.5"/></svg>',
+    icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><polygon points="12,3 15.5,9.5 23,10.5 17.5,16 19,23 12,19.5 5,23 6.5,16 1,10.5 8.5,9.5" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round"/></svg>',
     save = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M19 21H5C3.89 21 3 20.1 3 19V5C3 3.89 3.89 3 5 3H16L21 8V19C21 20.1 20.1 21 19 21Z" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 21V13H7V21" stroke="#FFFFFF" stroke-width="2"/><path d="M7 3V8H15" stroke="#FFFFFF" stroke-width="2"/></svg>',
     load = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M22 19C22 20.1 21.1 21 20 21H4C2.9 21 2 20.1 2 19V8C2 6.9 2.9 6 4 6H9L11 3H20C21.1 3 22 3.9 22 5V19Z" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     code = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><polyline points="16,18 22,12 16,6" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="8,6 2,12 8,18" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -412,7 +429,7 @@ local PROPERTY_DEFS = {
         {key="parentId", label="Parent", kind="text"},
         {key="groupId",  label="Grup",   kind="text"},
         {key="componentId", label="Bileşen ID",   kind="text"},
-        {key="componentInstanceOf", label="Bileşen Kaynağı",   kind="text"},
+        {key="componentInstanceOf", label="B. Kaynağı",   kind="text"},
         {key="componentDetached", label="Ayrılmış",   kind="boolean"},
         {kind="group", label="Konum ve Boyut"},
         {key="x",      label="X",       kind="number"},
@@ -423,25 +440,25 @@ local PROPERTY_DEFS = {
         {key="anchorY",label="Anchor Y", kind="enum", options=ANCHOR_Y_OPTIONS},
         {key="dockX",  label="Dock X",   kind="enum", options=DOCK_OPTIONS},
         {key="dockY",  label="Dock Y",   kind="enum", options=DOCK_OPTIONS},
-        {key="dockPaddingRight", label="Sag Bosluk", kind="number"},
-        {key="dockPaddingBottom",label="Alt Bosluk", kind="number"},
-        {key="relativeW", label="Genislik %", kind="boolean"},
-        {key="relativeH", label="Yukseklik %", kind="boolean"},
-        {key="wPercent", label="Genislik Yuzde", kind="number"},
-        {key="hPercent", label="Yukseklik Yuzde", kind="number"},
+        {key="dockPaddingRight", label="Sağ Boşluk", kind="number"},
+        {key="dockPaddingBottom",label="Alt Boşluk", kind="number"},
+        {key="relativeW", label="Göreceli G.", kind="boolean"},
+        {key="relativeH", label="Göreceli Y.", kind="boolean"},
+        {key="wPercent", label="G. Yüzdesi", kind="number"},
+        {key="hPercent", label="Y. Yüzdesi", kind="number"},
         {kind="group", label="Durum"},
         {key="locked", label="Kilitli", kind="boolean"},
-        {key="visible",label="Gorunur", kind="boolean"},
-        {kind="group", label="Etkilesim"},
-        {key="clickAction", label="Tik Aksiyonu", kind="enum", options=ACTION_TYPE_OPTIONS},
+        {key="visible",label="Görünür", kind="boolean"},
+        {kind="group", label="Etkileşim"},
+        {key="clickAction", label="Tık Aksiyonu", kind="enum", options=ACTION_TYPE_OPTIONS},
         {key="actionTarget", label="Hedef ID", kind="text"},
-        {key="actionValue", label="Deger", kind="text"},
+        {key="actionValue", label="Değer", kind="text"},
         {kind="group", label="Animasyon"},
         {key="animationType", label="Animasyon", kind="enum", options=ANIMATION_TYPE_OPTIONS},
         {key="animationTrigger", label="Tetik", kind="enum", options=ANIMATION_TRIGGER_OPTIONS},
-        {key="animationDuration", label="Sure(ms)", kind="number"},
-        {key="animationLoop", label="Dongu", kind="boolean"},
-        {key="animationIntensity", label="Etki", kind="number"},
+        {key="animationDuration", label="Süre (ms)", kind="number"},
+        {key="animationLoop", label="Döngü", kind="boolean"},
+        {key="animationIntensity", label="Yoğunluk", kind="number"},
     },
     window = {
         {kind="group", label="İçerik"},
@@ -514,56 +531,56 @@ local PROPERTY_DEFS = {
         {key="radius",    label="Yarıçap", kind="number"},
     },
     container = {
-        {kind="group", label="Kapsayici"},
+        {kind="group", label="Kapsayıcı"},
         {key="color",  label="Renk",    kind="color"},
-        {key="radius", label="Yaricap", kind="number"},
+        {key="radius", label="Yarıçap", kind="number"},
     },
     progressbar = {
         {kind="group", label="Doluluk"},
-        {key="progress",      label="Yuzde",     kind="number"},
-        {key="text",          label="Yazi",      kind="text"},
+        {key="progress",      label="Yüzde",     kind="number"},
+        {key="text",          label="Yazı",      kind="text"},
         {key="color",         label="Arka Plan", kind="color"},
         {key="progressColor", label="Dolgu",     kind="color"},
-        {key="textColor",     label="Yazi Renk", kind="color"},
-        {key="radius",        label="Yaricap",   kind="number"},
+        {key="textColor",     label="Yazı Renk", kind="color"},
+        {key="radius",        label="Yarıçap",   kind="number"},
     },
     checkbox = {
-        {kind="group", label="Checkbox"},
-        {key="checked",    label="Secili",    kind="boolean"},
-        {key="text",       label="Yazi",      kind="text"},
+        {kind="group", label="Onay Kutusu"},
+        {key="checked",    label="Seçili",    kind="boolean"},
+        {key="text",       label="Yazı",      kind="text"},
         {key="boxColor",   label="Kutu",      kind="color"},
         {key="checkColor", label="Tik",       kind="color"},
-        {key="textColor",  label="Yazi Renk", kind="color"},
+        {key="textColor",  label="Yazı Renk", kind="color"},
         {key="fontScale",  label="Boyut",     kind="number"},
         {key="font",       label="Font",      kind="enum", options=FONT_OPTIONS},
     },
     editbox = {
-        {kind="group", label="EditBox"},
+        {kind="group", label="Metin Kutusu"},
         {key="text",        label="Metin",       kind="text"},
-        {key="placeholder", label="Placeholder", kind="text"},
+        {key="placeholder", label="Yer Tutucu",  kind="text"},
         {key="color",       label="Arka Plan",   kind="color"},
-        {key="borderColor", label="Cerceve",     kind="color"},
-        {key="textColor",   label="Yazi",        kind="color"},
+        {key="borderColor", label="Çerçeve",     kind="color"},
+        {key="textColor",   label="Yazı",        kind="color"},
         {key="fontScale",   label="Boyut",       kind="number"},
         {key="font",        label="Font",        kind="enum", options=FONT_OPTIONS},
-        {key="radius",      label="Yaricap",     kind="number"},
-        {key="masked",      label="Sifre",       kind="boolean"},
+        {key="radius",      label="Yarıçap",     kind="number"},
+        {key="masked",      label="Şifre",       kind="boolean"},
     },
     line = {
-        {kind="group", label="Cizgi"},
+        {kind="group", label="Çizgi"},
         {key="color",     label="Renk",      kind="color"},
-        {key="thickness", label="Kalinlik",  kind="number"},
+        {key="thickness", label="Kalınlık",  kind="number"},
     },
     gradient = {
-        {kind="group", label="Gradient"},
-        {key="color",         label="Baslangic", kind="color"},
-        {key="gradientColor", label="Bitis",     kind="color"},
-        {key="gradientMode",  label="Yon",       kind="enum", options={"horizontal","vertical"}},
-        {key="radius",        label="Yaricap",   kind="number"},
+        {kind="group", label="Gradyan"},
+        {key="color",         label="Başlangıç", kind="color"},
+        {key="gradientColor", label="Bitiş",     kind="color"},
+        {key="gradientMode",  label="Yön",       kind="enum", options={"horizontal","vertical"}},
+        {key="radius",        label="Yarıçap",   kind="number"},
     },
     icon = {
-        {kind="group", label="Ikon"},
-        {key="iconName", label="Ikon",  kind="enum", options={"window","button","label","rectangle","image","circle","save","load","code","copy","trash","layers","front","back","duplicate","clear","lock","eye_on","eye_off"}},
+        {kind="group", label="İkon"},
+        {key="iconName", label="Ikon",  kind="enum", options={"window","button","label","rectangle","image","circle","container","progressbar","checkbox","editbox","line","gradient","icon","save","load","code","copy","trash","layers","front","back","duplicate","clear","lock","eye_on","eye_off"}},
         {key="color",    label="Renk",  kind="color"},
         {key="iconSize", label="Boyut", kind="number"},
     },
@@ -584,7 +601,8 @@ local DEFAULT_STYLE_PRESETS = {
 }
 
 local function rgba(color)
-    return tocolor(color[1], color[2], color[3], color[4] or 255)
+    if type(color) ~= "table" then return tocolor(255, 255, 255, 255) end
+    return tocolor(color[1] or 255, color[2] or 255, color[3] or 255, color[4] or 255)
 end
 
 function snapToGrid(value, gridSize)
@@ -593,6 +611,7 @@ function snapToGrid(value, gridSize)
 end
 
 function insideRect(x, y, rx, ry, rw, rh)
+    if not (x and y and rx and ry and rw and rh) then return false end
     return x >= rx and x <= rx + rw and y >= ry and y <= ry + rh
 end
 
@@ -1366,25 +1385,27 @@ end
 local function getLayout()
     local screenW, screenH = _frameScreenW, _frameScreenH
     if screenW == 0 then screenW, screenH = guiGetScreenSize() end
-    local padding    = 18
-    local leftWidth  = math.max(260, math.floor(screenW * 0.19))
-    local rightWidth = math.max(360, math.floor(screenW * 0.27))
-    local middleW    = screenW - leftWidth - rightWidth - padding * 4
-    local middleH    = screenH - padding * 2
+    local padding    = 0
+    local topBarH    = 48
+    local leftWidth  = 240
+    local rightWidth = 280
+    local middleW    = screenW - leftWidth - rightWidth
+    local middleH    = screenH - topBarH
     local baseScale  = math.min(middleW / editor.canvas.width, middleH / editor.canvas.height)
     baseScale        = math.max(0.1, baseScale)
 
     local scale      = math.max(0.1, baseScale * editor.canvasZoom)
     local canvasW    = editor.canvas.width  * scale
     local canvasH    = editor.canvas.height * scale
-    local canvasX    = padding*2 + leftWidth  + math.max(0, (middleW - canvasW) / 2) + (editor.canvasPanX or 0)
-    local canvasY    = padding               + math.max(0, (middleH - canvasH) / 2) + (editor.canvasPanY or 0)
+    local canvasX    = leftWidth + math.max(0, (middleW - canvasW) / 2) + (editor.canvasPanX or 0)
+    local canvasY    = topBarH  + math.max(0, (middleH - canvasH) / 2) + (editor.canvasPanY or 0)
 
     return {
         screenW = screenW, screenH = screenH,
-        left   = {x=padding,                         y=padding, w=leftWidth,  h=screenH-padding*2},
-        right  = {x=screenW-rightWidth-padding,      y=padding, w=rightWidth, h=screenH-padding*2},
-        canvas = {x=canvasX, y=canvasY, w=canvasW, h=canvasH, scale=scale},
+        topBarH = topBarH,
+        left   = {x=0,                    y=topBarH, w=leftWidth,  h=screenH-topBarH},
+        right  = {x=screenW-rightWidth,   y=topBarH, w=rightWidth, h=screenH-topBarH},
+        canvas = {x=canvasX, y=canvasY,   w=canvasW, h=canvasH,   scale=scale},
     }
 end
 
@@ -1936,6 +1957,17 @@ local TOOLTIPS = {
     add_image="Yeni resim ekle", add_circle="Yeni daire ekle",
     align_left="Sola hizala", align_centerX="Yatay ortala", align_right="Sağa hizala",
     align_top="Yukarı hizala", align_centerY="Dikey ortala", align_bottom="Aşağı hizala",
+    ungroup_selection="Grubu çöz (Ctrl+Shift+U)",
+    clear_parent="Parent bağını kaldır",
+    distribute_x="Elemanları yatayda eşit dağıt",
+    distribute_y="Elemanları dikeyde eşit dağıt",
+    same_width="Tüm seçililere aynı genişlik",
+    same_height="Tüm seçililere aynı yükseklik",
+    preview_mode="Önizleme modunu aç/kapat (P)",
+    group_selection="Seçilileri grupla (Ctrl+Shift+G)",
+    parent_selection="Birincil elemana parent yap",
+    copy_style="Seçili elemanın stilini kopyala (Ctrl+Shift+S)",
+    paste_style="Kopyalanan stili yapıştır (Ctrl+Shift+V)",
 }
 
 function drawTooltip()
@@ -2786,7 +2818,7 @@ local function appendCommonExportRuntime(L, hasCustomFonts, hasHttpImages)
     ln("        local t=activeInput.text or ''")
     ln("        if #t > 0 then")
     ln("            local u=t:gsub('[\\128-\\191]', '')")
-    ln("            if #u>0 then activeInput.text=delChar(t) end") 
+    ln("            if #u>0 then activeInput.text=delChar(t) end") -- Need a better utf8 delete, but string.sub works for standard
     ln("        end")
     ln("    end")
     ln("end)")
@@ -3125,14 +3157,14 @@ local function exportToLuaFile()
 end
 
 local function refreshUiFonts()
-    UI_FONT_BOLD       = customFonts["gilroy-bold_14"]   or "default-bold"
-    UI_FONT_MEDIUM     = customFonts["gilroy-medium_14"] or "default"
-    UI_FONT_LIGHT      = customFonts["gilroy-light_14"]  or "default"
-    UI_FONT_BOLD_LG    = customFonts["gilroy-bold_17"]   or "default-bold"
-    UI_FONT_BOLD_SM    = customFonts["gilroy-bold_12"]   or "default-bold"
-    UI_FONT_BOLD_XS    = customFonts["gilroy-bold_10"]   or "default-bold"
-    UI_FONT_MEDIUM_SM  = customFonts["gilroy-medium_12"] or "default"
-    UI_FONT_MEDIUM_XS  = customFonts["gilroy-medium_10"] or "default"
+    UI_FONT_BOLD       = customFonts["sfui-semibold_14"] or customFonts["gilroy-bold_14"]   or "default-bold"
+    UI_FONT_MEDIUM     = customFonts["sfui-regular_14"]  or customFonts["gilroy-medium_14"] or "default"
+    UI_FONT_LIGHT      = customFonts["sfui-light_14"]    or customFonts["gilroy-light_14"]  or "default"
+    UI_FONT_BOLD_LG    = customFonts["sfui-semibold_17"] or customFonts["gilroy-bold_17"]   or "default-bold"
+    UI_FONT_BOLD_SM    = customFonts["sfui-semibold_12"] or customFonts["gilroy-bold_12"]   or "default-bold"
+    UI_FONT_BOLD_XS    = customFonts["sfui-medium_12"]   or customFonts["gilroy-bold_10"]   or "default-bold"
+    UI_FONT_MEDIUM_SM  = customFonts["sfui-regular_12"]  or customFonts["gilroy-medium_12"] or "default"
+    UI_FONT_MEDIUM_XS  = customFonts["sfui-light_12"]    or customFonts["gilroy-medium_10"] or "default"
 end
 
 local function drawButton(x, y, w, h, label, action, style, iconName)
@@ -3145,14 +3177,14 @@ local function drawButton(x, y, w, h, label, action, style, iconName)
     dxDrawUiRounded("btn_" .. action, x, y, w, h, 6, bgColor)
     local icon = iconName and getIcon(iconName)
     if icon then
-        local iSz = 16
-        local textW = dxGetTextWidth(label, 1, customFonts["gilroy-medium_14"])
-        local totalW = iSz + 6 + textW
+        local iSz = 14
+        local textW = dxGetTextWidth(label, 1, UI_FONT_BOLD_SM)
+        local totalW = iSz + 5 + textW
         local startX = x + (w - totalW) / 2
         dxDrawImage(startX, y + (h - iSz) / 2, iSz, iSz, icon, 0, 0, 0, themeColors.text)
-        dxDrawText(label, startX + iSz + 6, y, x + w - 8, y + h, themeColors.text, 1, customFonts["gilroy-medium_14"], "left", "center", false, false, false)
+        dxDrawText(label, startX + iSz + 5, y, x + w - 6, y + h, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "center", true, false, false)
     else
-        dxDrawText(label, x, y, x + w, y + h, themeColors.text, 1, customFonts["gilroy-medium_14"], "center", "center", false, false, false)
+        dxDrawText(label, x+4, y, x+w-4, y+h, themeColors.text, 1, UI_FONT_BOLD_SM, "center", "center", true, false, false)
     end
 end
 
@@ -3164,11 +3196,12 @@ local function drawSmallButton(x, y, w, h, label, action, active)
     local tgt = active and editor.theme.accent or (hovered and editor.theme.accentSoft or editor.theme.panelAlt)
     local bg = rgba(tgt)
     dxDrawUiRounded("sbtn_" .. action, x, y, w, h, 4, bg)
-    dxDrawText(label, x, y, x + w, y + h, themeColors.text, 1, UI_FONT_BOLD_XS, "center", "center", false, false, false)
+    local txtColor = active and themeColors.text or themeColors.textSecond
+    dxDrawText(label, x+2, y, x+w-2, y+h, txtColor, 1, UI_FONT_BOLD_XS, "center", "center", true, false, false)
 end
 
 local function drawElementPreview(layout, element)
-    local cx, cy    = getScreenCursor()
+    local cx, cy    = _canvasRTMode and nil or getScreenCursor()
     local canvasX, canvasY, canvasW, canvasH = getElementCanvasRect(element)
     local baseX, baseY, baseW, baseH = canvasToScreen(layout, canvasX, canvasY, canvasW, canvasH)
     local hovered = cx and insideRect(cx, cy, baseX, baseY, baseW, baseH)
@@ -3252,7 +3285,7 @@ local function drawElementPreview(layout, element)
         dxDrawEllipse(element.id, x, y, w, h, rgba(element.color))
     end
 
-    if isElementSelected(element.id) then
+    if not _canvasRTMode and isElementSelected(element.id) then
         dxDrawRectangle(x, y, w, h, themeColors.selectionFill)
         drawOutline(x-1, y-1, w+2, h+2, themeColors.selection, 2)
 
@@ -3333,9 +3366,66 @@ local function drawCanvas(layout)
         dxDrawImage(layout.canvas.x, layout.canvas.y, layout.canvas.w, layout.canvas.h, gridRT, 0, 0, 0, tocolor(255,255,255,255))
     end
 
-    for _, element in ipairs(editor.elements) do
-        if element.visible ~= false then
-            drawElementPreview(layout, element)
+    -- Zoom < 1.0 olduğunda dxDrawText scale<1 = blur; canvas RT ile native çiz, sonra küçült
+    local useRT = layout.canvas.scale < 0.999
+    if useRT then
+        local cw, ch = editor.canvas.width, editor.canvas.height
+        if not _canvasElemRT or not isElement(_canvasElemRT) or _canvasElemRTW ~= cw or _canvasElemRTH ~= ch then
+            if _canvasElemRT and isElement(_canvasElemRT) then destroyElement(_canvasElemRT) end
+            _canvasElemRT  = dxCreateRenderTarget(cw, ch, true)
+            _canvasElemRTW = cw; _canvasElemRTH = ch
+        end
+        if _canvasElemRT and isElement(_canvasElemRT) then
+            local nativeLayout = {canvas = {x=0, y=0, w=cw, h=ch, scale=1.0}}
+            dxSetRenderTarget(_canvasElemRT, true)
+            _canvasRTMode = true
+            for _, element in ipairs(editor.elements) do
+                if element.visible ~= false then
+                    drawElementPreview(nativeLayout, element)
+                end
+            end
+            _canvasRTMode = false
+            dxSetRenderTarget()
+            dxDrawImage(layout.canvas.x, layout.canvas.y, layout.canvas.w, layout.canvas.h, _canvasElemRT, 0, 0, 0, tocolor(255,255,255,255))
+            -- Selection overlay ve handle'lar ekran koordinatında kalsın
+            for _, element in ipairs(editor.elements) do
+                if element.visible ~= false and isElementSelected(element.id) then
+                    local canvasX, canvasY, canvasW, canvasH = getElementCanvasRect(element)
+                    local sx, sy, sw2, sh2 = canvasToScreen(layout, canvasX, canvasY, canvasW, canvasH)
+                    dxDrawRectangle(sx, sy, sw2, sh2, themeColors.selectionFill)
+                    drawOutline(sx-1, sy-1, sw2+2, sh2+2, themeColors.selection, 2)
+                    if element.locked then
+                        dxDrawText("🔒", sx, sy, sx+sw2, sy+sh2, tocolor(255,200,50,220), 1.2, UI_FONT_BOLD, "center", "center", false, false, false)
+                    else
+                        local handles = {
+                            {name="nw", x=sx-5,      y=sy-5      },
+                            {name="ne", x=sx+sw2-5,  y=sy-5      },
+                            {name="sw", x=sx-5,      y=sy+sh2-5  },
+                            {name="se", x=sx+sw2-5,  y=sy+sh2-5  },
+                        }
+                        for _, handle in ipairs(handles) do
+                            dxDrawRectangle(handle.x, handle.y, 10, 10, themeColors.selection)
+                            drawOutline(handle.x, handle.y, 10, 10, tocolor(8,11,16,255), 1)
+                            addHotbox("handle", handle.x, handle.y, 10, 10, {id=element.id, handle=handle.name})
+                        end
+                    end
+                end
+            end
+        else
+            for _, element in ipairs(editor.elements) do
+                if element.visible ~= false then drawElementPreview(layout, element) end
+            end
+        end
+    else
+        -- scale >= 1.0: dxDrawText scale>=1 keskin, direkt çiz
+        if _canvasElemRT and isElement(_canvasElemRT) then
+            destroyElement(_canvasElemRT)
+            _canvasElemRT = nil
+        end
+        for _, element in ipairs(editor.elements) do
+            if element.visible ~= false then
+                drawElementPreview(layout, element)
+            end
         end
     end
 
@@ -3489,112 +3579,203 @@ local function drawLayersPanel(panelX, panelY, panelW, availableHeight)
     end
 end
 
+local function drawTopBar(layout)
+    local sw = layout.screenW
+    local th = layout.topBarH
+    if not _skipPanelDraw then
+        dxDrawRectangle(0, 0, sw, th, themeColors.panel)
+        dxDrawRectangle(0, th-1, sw, 1, themeColors.borderSubtle)
+
+        -- Logo / title
+        dxDrawText("DX UI Creator", 16, 0, 200, th, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "center", false, false, false)
+
+        -- Canvas boyutu etiket
+        local presetLabelX = 208
+        dxDrawText("Canvas:", presetLabelX, 0, presetLabelX+54, th, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "center", false, false, false)
+    end
+
+    -- Canvas preset mini butonları — kısa etiket kullan (genişlik x yükseklik)
+    local presetShort = {"720p","1080p","768p","600p","1440p","1024"}
+    local pBh = 28
+    local pBw = 58
+    local pGap = 4
+    local presetStartX = 268
+    for i, preset in ipairs(CANVAS_PRESETS) do
+        local active = editor.canvas.width == preset.w and editor.canvas.height == preset.h
+        local bx = presetStartX + (i-1)*(pBw+pGap)
+        local by = (th - pBh) / 2
+        drawSmallButton(bx, by, pBw, pBh, presetShort[i] or preset.label, "preset_"..i, active)
+    end
+
+    -- Ayırıcı
+    local sepX = presetStartX + #CANVAS_PRESETS*(pBw+pGap) + 8
+    if not _skipPanelDraw then
+        dxDrawRectangle(sepX, 10, 1, th-20, themeColors.borderSubtle)
+    end
+
+    -- Grid label + butonlar
+    local gridX = sepX + 12
+    if not _skipPanelDraw then
+        dxDrawText("Grid", gridX, 0, gridX+26, th, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "center", false, false, false)
+    end
+    local gBw = 34
+    for i, gs in ipairs({10, 20, 40, 80}) do
+        local bx = gridX + 28 + (i-1)*(gBw+3)
+        local by = (th - 26) / 2
+        drawSmallButton(bx, by, gBw, 26, tostring(gs), "grid_"..gs, editor.canvas.grid == gs)
+    end
+
+    -- Sağ taraf: zoom + snap + guide
+    local rightEdge = sw - layout.right.w - 12
+    local zBw = 52
+    local zBh = 28
+    local zBy = (th - zBh) / 2
+    -- Zoom bilgisi (tıklanamaz, sadece metin)
+    if not _skipPanelDraw then
+        local zText = string.format("%.0f%%", editor.canvasZoom * 100)
+        local zTextX = rightEdge - zBw*3 - 12
+        dxDrawText(zText, zTextX, 0, zTextX+44, th, themeColors.muted, 1, UI_FONT_BOLD_SM, "right", "center", false, false, false)
+    end
+    -- Snap toggle buton
+    local snapBx = rightEdge - zBw*2 - 8
+    local snapActive = editor.snapEnabled
+    local snapStyle = snapActive and {normal=editor.theme.accentActive, hover=editor.theme.accent} or {normal=editor.theme.panelAlt, hover=editor.theme.panelHover}
+    drawButton(snapBx, zBy, zBw, zBh, "SNAP", "toggle_snap", snapStyle, nil)
+    -- Guide toggle buton
+    local guideBx = rightEdge - zBw - 4
+    local guideActive = editor.smartSnapEnabled
+    local guideStyle = guideActive and {normal=editor.theme.accentActive, hover=editor.theme.accent} or {normal=editor.theme.panelAlt, hover=editor.theme.panelHover}
+    drawButton(guideBx, zBy, zBw, zBh, "GUIDE", "toggle_smart_snap", guideStyle, nil)
+end
+
 function drawLeftPanel(layout)
     local panel = layout.left
+    local px = panel.x
+    local py = panel.y
+
     if not _skipPanelDraw then
-        dxDrawUiRounded("left_panel", panel.x, panel.y, panel.w, panel.h, 10, themeColors.panel)
-        drawOutline(panel.x, panel.y, panel.w, panel.h, themeColors.panelBorder, 1)
-        dxDrawText("DX UI Oluşturucu", panel.x+16, panel.y+14, panel.x+panel.w-16, panel.y+42, themeColors.text, 1, UI_FONT_BOLD_LG, "left", "top", false, false, false)
-        dxDrawText("Oyun içi DX arayüz tasarım aracı", panel.x+16, panel.y+42, panel.x+panel.w-16, panel.y+60, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
-        local presetY = panel.y + 64
-        dxDrawText("Canvas Boyutu:", panel.x+16, presetY, panel.x+100, presetY+18, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "center", false, false, false)
+        -- Panel arkaplanı (kenar çizgisi sağda)
+        dxDrawRectangle(px, py, panel.w, panel.h, themeColors.panel)
+        dxDrawRectangle(px+panel.w-1, py, 1, panel.h, themeColors.borderSubtle)
     end
 
-    local presetY = panel.y + 64
-    local pw = (panel.w - 32 - 2*4) / 3
-    for i, preset in ipairs(CANVAS_PRESETS) do
-        local col4 = (i-1) % 3
-        local row4 = math.floor((i-1) / 3)
-        local px2 = panel.x + 16 + col4 * (pw+4)
-        local active = editor.canvas.width == preset.w and editor.canvas.height == preset.h
-        drawSmallButton(px2, presetY+20 + row4*26, pw, 22, preset.label, "preset_"..i, active)
+    local pad = 12
+    local cy2 = py + pad
+
+    -- ── SECTION: Elementler ──────────────────────────────
+    if not _skipPanelDraw then
+        dxDrawText("ELEMENTLER", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
     end
+    cy2 = cy2 + 20
 
-    local st = {normal=editor.theme.panelAlt,  hover=editor.theme.accentHover}
-    local ss = {normal=editor.theme.success,   hover=editor.theme.successHover}
-    local sl = {normal=editor.theme.panelAlt,  hover=editor.theme.accent}
-
-    local startY = panel.y + 136
-    local gutter = 8
-    local bw     = (panel.w - 32 - gutter) / 2
-    local bh     = 38
-
+    local gutter = 6
+    local bw  = (panel.w - pad*2 - gutter) / 2
+    local bh  = 36
+    local st  = {normal=editor.theme.panelAlt, hover=editor.theme.panelHover}
     local addButtons = {
-        {"Pencere","add_window","window"}, {"Buton","add_button","button"},
-        {"Yazı","add_label","label"},     {"Dikdörtgen","add_rectangle","rectangle"},
-        {"Resim","add_image","image"},    {"Daire","add_circle","circle"},
+        {"Pencere","add_window","window"},     {"Buton","add_button","button"},
+        {"Yazı","add_label","label"},          {"Dikdörtgen","add_rectangle","rectangle"},
+        {"Resim","add_image","image"},         {"Daire","add_circle","circle"},
         {"Container","add_container","container"}, {"Bar","add_progressbar","progressbar"},
-        {"Check","add_checkbox","checkbox"}, {"Edit","add_editbox","editbox"},
-        {"Çizgi","add_line","line"}, {"Gradient","add_gradient","gradient"},
+        {"Check","add_checkbox","checkbox"},   {"Edit","add_editbox","editbox"},
+        {"Çizgi","add_line","line"},           {"Gradyan","add_gradient","gradient"},
         {"İkon","add_icon","icon"},
     }
     for i, ab in ipairs(addButtons) do
         local col = (i-1) % 2
         local row = math.floor((i-1) / 2)
-        drawButton(panel.x+16 + col*(bw+gutter), startY + row*(bh+6), bw, bh, ab[1], ab[2], st, ab[3])
+        drawButton(px+pad + col*(bw+gutter), cy2 + row*(bh+5), bw, bh, ab[1], ab[2], st, ab[3])
     end
+    cy2 = cy2 + math.ceil(#addButtons/2) * (bh+5)
 
-    local saveLoadY = startY + math.ceil(#addButtons / 2)*(bh+6) + 4
-    drawButton(panel.x+16,           saveLoadY,      bw, bh, "Kaydet",      "save_project",   ss, "save")
-    drawButton(panel.x+16+bw+gutter, saveLoadY,      bw, bh, "Yükle",       "load_project",   sl, "load")
-    drawButton(panel.x+16,           saveLoadY+bh+6, bw, bh, "Lua'ya Yaz",  "export_to_file", ss, "code")
-    drawButton(panel.x+16+bw+gutter, saveLoadY+bh+6, bw, bh, "Kodu Kopyala","copy_export",    st, "copy")
-
-    local presetY2 = saveLoadY + (bh+6)*2 + 8
-    ensureStylePresets()
-    for i = 1, math.min(2, #editor.stylePresets) do
-        drawSmallButton(panel.x+16 + (i-1)*((panel.w-40)/2 + 8), presetY2, (panel.w-40)/2, 22, "Style "..tostring(i), "style_preset_"..i, false)
-    end
-    for i = 1, math.min(2, #editor.prefabList) do
-        drawSmallButton(panel.x+16 + (i-1)*((panel.w-40)/2 + 8), presetY2 + 26, (panel.w-40)/2, 22, "Prefab "..tostring(i), "prefab_"..i, false)
-    end
-
-    local shortY = presetY2 + 56
-    local shortcutCount = 10
+    -- ── AYIRICI ──────────────────────────────────────────
+    cy2 = cy2 + 8
     if not _skipPanelDraw then
-        dxDrawText("Şablonlar", panel.x+16, shortY-2, panel.x+panel.w-16, shortY+14, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
+        dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
     end
+    cy2 = cy2 + 10
+
+    -- ── SECTION: Dosya ───────────────────────────────────
+    if not _skipPanelDraw then
+        dxDrawText("DOSYA", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+    end
+    cy2 = cy2 + 20
+
+    local ss = {normal=editor.theme.success,  hover=editor.theme.successHover}
+    local sa = {normal=editor.theme.panelAlt, hover=editor.theme.accentHover}
+    local fbh = 32
+    drawButton(px+pad,           cy2,          bw, fbh, "Kaydet",       "save_project",   ss, "save")
+    drawButton(px+pad+bw+gutter, cy2,          bw, fbh, "Yükle",        "load_project",   sa, "load")
+    drawButton(px+pad,           cy2+fbh+4,    bw, fbh, "Lua Yaz",   "export_to_file", ss, "code")
+    drawButton(px+pad+bw+gutter, cy2+fbh+4,    bw, fbh, "Kopyala",   "copy_export",    sa, "copy")
+    cy2 = cy2 + (fbh+4)*2
+
+    -- ── AYIRICI ──────────────────────────────────────────
+    cy2 = cy2 + 8
+    if not _skipPanelDraw then
+        dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
+    end
+    cy2 = cy2 + 10
+
+    -- ── SECTION: Şablonlar ───────────────────────────────
+    if not _skipPanelDraw then
+        dxDrawText("ŞABLONLAR", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+    end
+    cy2 = cy2 + 20
     local templateBtns = {
-        {"Giriş Ekranı", "template_login"},
-        {"Bildirim", "template_notification"},
-        {"Envanter", "template_inventory"},
-        {"HUD Bar", "template_hud"},
+        {"Giriş Ekranı","template_login"}, {"Bildirim","template_notification"},
+        {"Envanter","template_inventory"}, {"HUD Bar","template_hud"},
     }
-    local tBw = (panel.w - 32 - 4) / 2
+    local tBw = (panel.w - pad*2 - gutter) / 2
     for i, tb in ipairs(templateBtns) do
         local col3 = (i-1) % 2
         local row3 = math.floor((i-1) / 2)
-        drawSmallButton(panel.x+16 + col3*(tBw+4), shortY+16 + row3*26, tBw, 22, tb[1], tb[2], false)
+        drawSmallButton(px+pad + col3*(tBw+gutter), cy2 + row3*26, tBw, 22, tb[1], tb[2], false)
     end
-    local shortY = shortY + 16 + math.ceil(#templateBtns/2)*26 + 4
+    cy2 = cy2 + math.ceil(#templateBtns/2)*26
+
+    -- ── AYIRICI ──────────────────────────────────────────
+    cy2 = cy2 + 8
     if not _skipPanelDraw then
-        dxDrawText("Kısayollar", panel.x+16, shortY, panel.x+panel.w-16, shortY+18, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
+        dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
+    end
+    cy2 = cy2 + 10
+
+    -- ── SECTION: Kısayollar ──────────────────────────────
+    if not _skipPanelDraw then
+        dxDrawText("KISAYOLLAR", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
         local shortcuts = {
-            "F7 / /dxui  :  Editörü aç/kapat",
-            "Del          :  Seçili elemanı sil",
-            "Ctrl+Z/Y   :  Geri / ileri al",
-            "Ctrl+C       :  Elemanları kopyala",
-            "Ctrl+V       :  Elemanları yapıştır",
-            "Ctrl+A       :  Tümünü seç",
-            "Ctrl+D       :  Çoğalt",
-            "Ctrl+Shift+C :  Kodu Kopyala",
-            "Ctrl+S       :  Kaydet",
-            "Yön tuşları :  Taşı  (Shift = 10px)",
-            "Sürükle boş :  Kutu ile çoklu seç",
-            "G               :  Snap aç / kapat",
-            "Scroll canvas:  Zoom",
-            "Orta tuş      :  Pan",
+            "F7 / /dxui  →  Editör aç/kapat",
+            "Del  →  Seçili sil",
+            "Ctrl+Z/Y  →  Geri / İleri",
+            "Ctrl+C/V  →  Kopyala / Yapıştır",
+            "Ctrl+A  →  Tümünü seç",
+            "Ctrl+D  →  Çoğalt",
+            "Ctrl+S  →  Kaydet",
+            "Ctrl+=/-  →  Zoom +/-",
+            "G  →  Grid snap",
+            "H  →  Kılavuz çizgiler",
+            "P  →  Önizleme",
         }
-        shortcutCount = #shortcuts
-        local textY = shortY + 22
+        local textY = cy2 + 18
         for _, line in ipairs(shortcuts) do
-            dxDrawText(line, panel.x+16, textY, panel.x+panel.w-16, textY+16, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
-            textY = textY + 17
+            dxDrawText(line, px+pad, textY, px+panel.w-pad, textY+15, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
+            textY = textY + 16
         end
+        cy2 = textY
+    else
+        cy2 = cy2 + 18 + 11*16
     end
 
-    local layerStartY = shortY + 22 + shortcutCount * 17
-    drawLayersPanel(panel.x+16, layerStartY+8, panel.w-32, panel.y+panel.h-(layerStartY+20))
+    -- ── AYIRICI ──────────────────────────────────────────
+    cy2 = cy2 + 8
+    if not _skipPanelDraw then
+        dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
+    end
+    cy2 = cy2 + 8
+
+    -- ── Katmanlar ────────────────────────────────────────
+    drawLayersPanel(px+pad, cy2, panel.w-pad*2, panel.y+panel.h - cy2 - pad)
 end
 function drawPropertyRow(x, y, w, property, element)
     if property.kind == "group" then
@@ -3631,7 +3812,8 @@ function drawPropertyRow(x, y, w, property, element)
     local valueBg       = isActive and themeColors.accent or themeColors.panelSoft
     local valueTextColor= isActive and tocolor(10,12,18,255) or themeColors.text
 
-    dxDrawText(property.label, x, y, x+labelW-30, y+rowH, themeColors.muted, 1, UI_FONT_BOLD_SM, "left", "center", false, false, false)
+    local labelRight = isColor and (x+labelW-30) or (x+labelW-4)
+    dxDrawText(property.label, x, y, labelRight, y+rowH, themeColors.muted, 1, UI_FONT_BOLD_SM, "left", "center", true, false, false)
     dxDrawUiRounded("prop_"..property.key, valueX, y+4, valueW, rowH-8, 4, valueBg)
 
     local isDropdown = property.kind == "enum" and editor.enumDropdown and editor.enumDropdown.elementId == element.id and editor.enumDropdown.key == property.key
@@ -3683,163 +3865,214 @@ end
 
 function drawRightPanel(layout)
     local panel = layout.right
+    local px = panel.x
+    local py = panel.y
 
     if not _skipPanelDraw then
-        dxDrawUiRounded("right_panel", panel.x, panel.y, panel.w, panel.h, 10, themeColors.panel)
-        drawOutline(panel.x, panel.y, panel.w, panel.h, themeColors.panelBorder, 1)
-        dxDrawText("Denetleyici", panel.x+16, panel.y+14, panel.x+panel.w-16, panel.y+38, themeColors.text, 1, UI_FONT_BOLD_LG, "left", "top", false, false, false)
-        dxDrawText("Seçili elemanı düzenle ve dışarı aktar", panel.x+16, panel.y+40, panel.x+panel.w-16, panel.y+58, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
+        dxDrawRectangle(px, py, panel.w, panel.h, themeColors.panel)
+        dxDrawRectangle(px, py, 1, panel.h, themeColors.borderSubtle)
+    end
+
+    -- Sekme başlıkları
+    local tabH   = 44
+    local tabs   = {{"Design","design"}, {"Kod","code"}}
+    local tabW   = panel.w / #tabs
+    local curTab = editor.rightPanelTab or "design"
+    if not _skipPanelDraw then
+        dxDrawRectangle(px, py, panel.w, tabH, themeColors.panelSoft)
+        dxDrawRectangle(px, py+tabH-1, panel.w, 1, themeColors.borderSubtle)
+    end
+    for i, tab in ipairs(tabs) do
+        local tx = px + (i-1)*tabW
+        local isActive = curTab == tab[2]
+        addHotbox("action", tx, py, tabW, tabH, {action="tab_right_"..tab[2]})
+        if not _skipPanelDraw then
+            local tabColor = isActive and themeColors.text or themeColors.muted
+            dxDrawText(tab[1], tx, py, tx+tabW, py+tabH, tabColor, 1, UI_FONT_BOLD_SM, "center", "center", false, false, false)
+            if isActive then
+                dxDrawRectangle(tx+tabW*0.15, py+tabH-2, tabW*0.7, 2, themeColors.accent)
+            end
+        end
     end
 
     local sp  = {normal=editor.theme.panelAlt, hover=editor.theme.accentHover}
     local dp  = {normal=editor.theme.danger,   hover=editor.theme.dangerHover}
 
-    local gutter2 = 8
-    local bw2 = (panel.w - 32 - gutter2) / 2
-    local bh2 = 36
-    local baseY = panel.y + 70
+    local gutter2 = 6
+    local bw2 = (panel.w - 24 - gutter2) / 2
+    local bh2 = 34
+    local baseY = py + tabH + 8
 
-    drawButton(panel.x+16,              baseY,            bw2, bh2, "Öne Al",      "bring_front",       sp, "front")
-    drawButton(panel.x+16+bw2+gutter2,  baseY,            bw2, bh2, "Arkaya At",   "send_back",         sp, "back")
-    drawButton(panel.x+16,              baseY+bh2+6,      bw2, bh2, "Bir Yukarı",  "layer_up",          sp, "front")
-    drawButton(panel.x+16+bw2+gutter2,  baseY+bh2+6,      bw2, bh2, "Bir Aşağı",   "layer_down",        sp, "back")
-    drawButton(panel.x+16,              baseY+(bh2+6)*2,   bw2, bh2, "Kopyala",     "duplicate_selected",sp, "duplicate")
-    drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*2,   bw2, bh2, "Sil",         "delete_selected",   dp, "trash")
-    drawButton(panel.x+16,              baseY+(bh2+6)*3,   bw2, bh2, "Grupla",      "group_selection",   sp, "layers")
-    drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*3,   bw2, bh2, "Parent Yap",  "parent_selection",  sp, "front")
-    drawButton(panel.x+16,              baseY+(bh2+6)*4,   bw2, bh2, "Stil Kopya",  "copy_style",        sp, "copy")
-    drawButton(panel.x+16+bw2+gutter2,  baseY+(bh2+6)*4,   bw2, bh2, "Stil Yapistir","paste_style",      sp, "duplicate")
+    if curTab == "design" then
+        drawButton(px+12,              baseY,            bw2, bh2, "Öne Al",      "bring_front",       sp, "front")
+        drawButton(px+12+bw2+gutter2,  baseY,            bw2, bh2, "Arkaya At",   "send_back",         sp, "back")
+        drawButton(px+12,              baseY+bh2+6,      bw2, bh2, "Bir Yukarı",  "layer_up",          sp, "front")
+        drawButton(px+12+bw2+gutter2,  baseY+bh2+6,      bw2, bh2, "Bir Aşağı",   "layer_down",        sp, "back")
+        drawButton(px+12,              baseY+(bh2+6)*2,   bw2, bh2, "Kopyala",     "duplicate_selected",sp, "duplicate")
+        drawButton(px+12+bw2+gutter2,  baseY+(bh2+6)*2,   bw2, bh2, "Sil",         "delete_selected",   dp, "trash")
+        drawButton(px+12,              baseY+(bh2+6)*3,   bw2, bh2, "Grupla",      "group_selection",   sp, "layers")
+        drawButton(px+12+bw2+gutter2,  baseY+(bh2+6)*3,   bw2, bh2, "Çöz",         "ungroup_selection", sp, "layers")
+        drawButton(px+12,              baseY+(bh2+6)*4,   bw2, bh2, "Parent Yap",  "parent_selection",  sp, "front")
+        drawButton(px+12+bw2+gutter2,  baseY+(bh2+6)*4,   bw2, bh2, "Par.Kaldır",  "clear_parent",      sp, "back")
+        drawButton(px+12,              baseY+(bh2+6)*5,   bw2, bh2, "Stil Kopya",  "copy_style",        sp, "copy")
+        drawButton(px+12+bw2+gutter2,  baseY+(bh2+6)*5,   bw2, bh2, "Stil Yapistir","paste_style",      sp, "duplicate")
 
-    local alignY = baseY + (bh2+6)*5 + 4
-    if not _skipPanelDraw then
-        dxDrawText("Hizalama:", panel.x+16, alignY, panel.x+panel.w-16, alignY+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
-    end
-    local aw  = (panel.w - 32 - 5*4) / 6
-    local alignBtns = {
-        {"◁", "align_left"},    {"⊣", "align_centerX"},  {"▷", "align_right"},
-        {"△", "align_top"},     {"⊥", "align_centerY"},  {"▽", "align_bottom"},
-    }
-    for i, ab in ipairs(alignBtns) do
-        drawSmallButton(panel.x+16+(i-1)*(aw+4), alignY+18, aw, 22, ab[1], ab[2], false)
-    end
-
-    drawButton(panel.x+16, alignY+44, panel.w-32, bh2-6, "Tümü Temizle", "clear_canvas", dp, "clear")
-
-    local sel         = getSelectedElement()
-    local inspectorY  = alignY + 44 + bh2
-    local previewH    = math.min(220, panel.h * 0.22)
-    local previewY    = panel.y + panel.h - previewH - 16
-    local viewportTop = inspectorY + 50
-    local viewportBot = previewY - 10
-    local viewportH   = math.max(60, viewportBot - viewportTop)
-
-    if not _skipPanelDraw then
-        dxDrawText("Özellikler", panel.x+16, inspectorY, panel.x+panel.w-16, inspectorY+18, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
-    end
-
-    if sel then
+        local alignY = baseY + (bh2+6)*6 + 4
         if not _skipPanelDraw then
-            dxDrawText(sel.id.."  ["..sel.type.."]".. (sel.locked and "  \240\159\148\146" or ""),
-                panel.x+16, inspectorY+20, panel.x+panel.w-16, inspectorY+40,
-                themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
+            dxDrawText("Hizalama:", px+12, alignY, px+panel.w-12, alignY+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+        end
+        local aw  = (panel.w - 24 - 5*4) / 6
+        local alignBtns = {
+            {"◁", "align_left"},    {"⊣", "align_centerX"},  {"▷", "align_right"},
+            {"△", "align_top"},     {"⊥", "align_centerY"},  {"▽", "align_bottom"},
+        }
+        for i, ab in ipairs(alignBtns) do
+            drawSmallButton(px+12+(i-1)*(aw+4), alignY+18, aw, 22, ab[1], ab[2], false)
         end
 
-        local properties   = _cachedPropertyLists[sel.type] or buildPropertyList(sel)
-        if not _cachedPropertyLists[sel.type] then _cachedPropertyLists[sel.type] = properties end
-        local totalHeight = 0
-        for _, p in ipairs(properties) do totalHeight = totalHeight + (p.kind == "group" and 26 or 34) end
-        totalHeight = totalHeight + (editor.activeInput and 26 or 0)
-        editor.inspectorScrollMax = math.max(0, totalHeight - viewportH)
-        editor.inspectorScroll    = clamp(editor.inspectorScroll or 0, 0, editor.inspectorScrollMax)
-        editor.inspectorArea      = {x=panel.x+16, y=viewportTop, w=panel.w-32, h=viewportH}
+        local distY = alignY + 44
+        if not _skipPanelDraw then
+            dxDrawText("Dağıt / Eşitle:", px+12, distY, px+panel.w-12, distY+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+        end
+        local dw4 = (panel.w - 24 - 3*4) / 4
+        local distBtns = {
+            {"Y.Dağıt", "distribute_x"},
+            {"D.Dağıt", "distribute_y"},
+            {"Eş Gen.",  "same_width"},
+            {"Eş Yük.",  "same_height"},
+        }
+        for i, db in ipairs(distBtns) do
+            drawSmallButton(px+12+(i-1)*(dw4+4), distY+18, dw4, 22, db[1], db[2], false)
+        end
 
-        local rowY = viewportTop - editor.inspectorScroll
-        for _, property in ipairs(properties) do
-            local rowH = property.kind == "group" and 26 or 34
-            local rowBot = rowY + rowH
-            if rowBot >= viewportTop and rowY <= viewportBot then
-                drawPropertyRow(panel.x+16, rowY, panel.w-32, property, sel)
+        local actRowY = distY + 44
+        local hw = (panel.w - 32) / 2
+        local pvStyle = editor.previewMode and {normal=editor.theme.accent, hover=editor.theme.accentHover} or sp
+        drawButton(px+12,       actRowY, hw, bh2-6, editor.previewMode and "✓ Önizleme" or "Önizleme", "preview_mode", pvStyle, nil)
+        drawButton(px+20+hw,    actRowY, hw, bh2-6, "Tümü Temizle", "clear_canvas", dp, "clear")
+
+        local sel         = getSelectedElement()
+        local inspectorY  = actRowY + bh2
+        local viewportTop = inspectorY + 50
+        local viewportBot = py + panel.h - 10
+        local viewportH   = math.max(60, viewportBot - viewportTop)
+
+        if not _skipPanelDraw then
+            dxDrawText("Özellikler", px+12, inspectorY, px+panel.w-12, inspectorY+20, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
+        end
+
+        if sel then
+            if not _skipPanelDraw then
+                dxDrawText(sel.id.."  ["..sel.type.."]".. (sel.locked and "  \240\159\148\146" or ""),
+                    px+12, inspectorY+20, px+panel.w-12, inspectorY+40,
+                    themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "top", false, false, false)
             end
-            rowY = rowY + rowH
-        end
 
-        if not _skipPanelDraw and editor.activeInput then
-            local hintY = rowY + 4
-            if hintY+18 >= viewportTop and hintY <= viewportBot then
-                dxDrawText("Enter: Onayla  |  Esc: İptal et", panel.x+16, hintY, panel.x+panel.w-16, hintY+18, themeColors.warning, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+            local properties   = _cachedPropertyLists[sel.type] or buildPropertyList(sel)
+            if not _cachedPropertyLists[sel.type] then _cachedPropertyLists[sel.type] = properties end
+            local totalHeight = 0
+            for _, p in ipairs(properties) do totalHeight = totalHeight + (p.kind == "group" and 26 or 34) end
+            totalHeight = totalHeight + (editor.activeInput and 26 or 0)
+            editor.inspectorScrollMax = math.max(0, totalHeight - viewportH)
+            editor.inspectorScroll    = clamp(editor.inspectorScroll or 0, 0, editor.inspectorScrollMax)
+            editor.inspectorArea      = {x=px+12, y=viewportTop, w=panel.w-24, h=viewportH}
+
+            local rowY = viewportTop - editor.inspectorScroll
+            for _, property in ipairs(properties) do
+                local rowH = property.kind == "group" and 26 or 34
+                local rowBot = rowY + rowH
+                if rowBot >= viewportTop and rowY <= viewportBot then
+                    drawPropertyRow(px+12, rowY, panel.w-24, property, sel)
+                end
+                rowY = rowY + rowH
+            end
+
+            if not _skipPanelDraw and editor.activeInput then
+                local hintY = rowY + 4
+                if hintY+18 >= viewportTop and hintY <= viewportBot then
+                    dxDrawText("Enter: Onayla  |  Esc: İptal et", px+12, hintY, px+panel.w-12, hintY+18, themeColors.warning, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
+                end
+            end
+
+            if not _skipPanelDraw and editor.inspectorScrollMax > 0 then
+                local barX   = px + panel.w - 10
+                local thumbH = math.max(20, (viewportH / totalHeight) * viewportH)
+                local thumbY = viewportTop + (editor.inspectorScroll / editor.inspectorScrollMax) * (viewportH - thumbH)
+                dxDrawUiRounded("iscroll_bg", barX, viewportTop, 4, viewportH, 2, themeColors.panelSoft)
+                dxDrawUiRounded("iscroll_thumb", barX, round(thumbY), 4, round(thumbH), 2, themeColors.accent)
+            end
+        else
+            editor.inspectorArea = nil; editor.inspectorScroll = 0; editor.inspectorScrollMax = 0
+            if not _skipPanelDraw then
+                dxDrawUiRounded("inspector_empty", px+12, inspectorY+26, panel.w-24, 90, 6, themeColors.panelSoft)
+                dxDrawText("Canvas üzerinden bir eleman seçin.\nYa da sol panelden yeni eleman ekleyin.", px+24, inspectorY+38, px+panel.w-24, inspectorY+110, themeColors.muted, 1, UI_FONT_MEDIUM_SM, "left", "top", false, true, false)
             end
         end
 
-        if not _skipPanelDraw and editor.inspectorScrollMax > 0 then
-            local barX   = panel.x + panel.w - 10
-            local thumbH = math.max(20, (viewportH / totalHeight) * viewportH)
-            local thumbY = viewportTop + (editor.inspectorScroll / editor.inspectorScrollMax) * (viewportH - thumbH)
-            dxDrawUiRounded("iscroll_bg", barX, viewportTop, 4, viewportH, 2, themeColors.panelSoft)
-            dxDrawUiRounded("iscroll_thumb", barX, round(thumbY), 4, round(thumbH), 2, themeColors.accent)
-        end
-    else
+        editor.previewArea = nil
+
+    elseif curTab == "code" then
         editor.inspectorArea = nil; editor.inspectorScroll = 0; editor.inspectorScrollMax = 0
+
+        local previewH    = panel.h - tabH - 32
+        local previewY    = py + tabH + 16
+
+        editor.previewArea = {x=px+12, y=previewY, w=panel.w-24, h=previewH}
+        addHotbox("preview_drag", px+12, previewY, panel.w-24, previewH, {})
+
         if not _skipPanelDraw then
-            dxDrawUiRounded("inspector_empty", panel.x+16, inspectorY+26, panel.w-32, 90, 6, themeColors.panelSoft)
-            dxDrawText("Canvas üzerinden bir eleman seçin.\nYa da sol panelden yeni eleman ekleyin.", panel.x+28, inspectorY+38, panel.x+panel.w-28, inspectorY+110, themeColors.muted, 1, UI_FONT_MEDIUM_SM, "left", "top", false, true, false)
-        end
-    end
+            if not editor.interaction then ensureExport() end
+            dxDrawText("Kod Önizlemesi", px+12, previewY-22, px+panel.w-12, previewY-4, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
+            dxDrawUiRounded("preview_bg", px+12, previewY, panel.w-24, previewH, 6, tocolor(8,11,16,220))
 
-    editor.previewArea = {x=panel.x+16, y=previewY, w=panel.w-32, h=previewH}
-    addHotbox("preview_drag", panel.x+16, previewY, panel.w-32, previewH, {})
+            local lineH = 14
+            local lineCount = 1
+            for _ in editor.exportCache:gmatch("\n") do lineCount = lineCount + 1 end
+            local totalTextH = lineCount * lineH
+            local innerH = previewH - 20
+            editor.previewScrollMax = math.max(0, totalTextH - innerH)
+            editor.previewScroll = clamp(editor.previewScroll or 0, 0, editor.previewScrollMax)
 
-    if not _skipPanelDraw then
-        if not editor.interaction then ensureExport() end
-        dxDrawText("Kod Önizlemesi", panel.x+16, previewY-22, panel.x+panel.w-16, previewY-4, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "top", false, false, false)
-        dxDrawUiRounded("preview_bg", panel.x+16, previewY, panel.w-32, previewH, 6, tocolor(8,11,16,220))
+            local panelRTActive = _panelRT and isElement(_panelRT)
+            if panelRTActive then dxSetRenderTarget() end
 
-        local lineH = 14
-        local lineCount = 1
-        for _ in editor.exportCache:gmatch("\n") do lineCount = lineCount + 1 end
-        local totalTextH = lineCount * lineH
-        local innerH = previewH - 20
-        editor.previewScrollMax = math.max(0, totalTextH - innerH)
-        editor.previewScroll = clamp(editor.previewScroll or 0, 0, editor.previewScrollMax)
+            local pvW = math.max(1, round(panel.w-24))
+            local pvH = math.max(1, round(previewH))
+            local needsPreviewRedraw = not _previewCachedRT or not isElement(_previewCachedRT)
+                                    or _previewCachedW ~= pvW or _previewCachedH ~= pvH
+                                    or _lastPreviewCacheCode ~= editor.exportCache
+                                    or _lastPreviewScroll ~= editor.previewScroll
 
-        local panelRTActive = _panelRT and isElement(_panelRT)
-        if panelRTActive then dxSetRenderTarget() end
+            if needsPreviewRedraw then
+                if not _previewCachedRT or not isElement(_previewCachedRT) or _previewCachedW ~= pvW or _previewCachedH ~= pvH then
+                    if _previewCachedRT and isElement(_previewCachedRT) then destroyElement(_previewCachedRT) end
+                    _previewCachedRT = dxCreateRenderTarget(pvW, pvH, true)
+                    _previewCachedW = pvW; _previewCachedH = pvH
+                end
 
-        local pvW = math.max(1, round(panel.w-32))
-        local pvH = math.max(1, round(previewH))
-        local needsPreviewRedraw = not _previewCachedRT or not isElement(_previewCachedRT) 
-                                or _previewCachedW ~= pvW or _previewCachedH ~= pvH
-                                or _lastPreviewCacheCode ~= editor.exportCache
-                                or _lastPreviewScroll ~= editor.previewScroll
-
-        if needsPreviewRedraw then
-            if not _previewCachedRT or not isElement(_previewCachedRT) or _previewCachedW ~= pvW or _previewCachedH ~= pvH then
-                if _previewCachedRT and isElement(_previewCachedRT) then destroyElement(_previewCachedRT) end
-                _previewCachedRT = dxCreateRenderTarget(pvW, pvH, true)
-                _previewCachedW = pvW; _previewCachedH = pvH
+                if _previewCachedRT then
+                    dxSetRenderTarget(_previewCachedRT, true)
+                    dxDrawRectangle(0, 0, pvW, pvH, tocolor(8,11,16,220))
+                    dxDrawText(editor.exportCache, 8, 10 - editor.previewScroll, pvW-8, totalTextH + 10, themeColors.text, 1, UI_FONT_MEDIUM_XS, "left", "top", true, false, false)
+                    dxSetRenderTarget()
+                end
+                _lastPreviewCacheCode = editor.exportCache
+                _lastPreviewScroll = editor.previewScroll
             end
+
+            if panelRTActive then dxSetRenderTarget(_panelRT) end
 
             if _previewCachedRT then
-                dxSetRenderTarget(_previewCachedRT, true)
-                dxDrawRectangle(0, 0, pvW, pvH, tocolor(8,11,16,220))
-                dxDrawText(editor.exportCache, 8, 10 - editor.previewScroll, pvW-8, totalTextH + 10, themeColors.text, 1, UI_FONT_MEDIUM_XS, "left", "top", true, false, false)
-                dxSetRenderTarget()
+                dxDrawImage(px+12, previewY, pvW, pvH, _previewCachedRT)
             end
-            _lastPreviewCacheCode = editor.exportCache
-            _lastPreviewScroll = editor.previewScroll
-        end
 
-        if panelRTActive then dxSetRenderTarget(_panelRT) end
-
-        if _previewCachedRT then
-            dxDrawImage(panel.x+16, previewY, pvW, pvH, _previewCachedRT)
-        end
-
-        if editor.previewScrollMax > 0 then
-            local barX   = panel.x + panel.w - 20
-            local thumbH = math.max(12, (innerH / totalTextH) * previewH)
-            local thumbY = previewY + (editor.previewScroll / editor.previewScrollMax) * (previewH - thumbH)
-            dxDrawRectangle(barX, previewY, 3, previewH, themeColors.panelAlt)
-            dxDrawUiRounded("preview_thumb", barX, round(thumbY), 3, round(thumbH), 2, themeColors.accent)
+            if editor.previewScrollMax > 0 then
+                local barX   = px + panel.w - 16
+                local thumbH = math.max(12, (innerH / totalTextH) * previewH)
+                local thumbY = previewY + (editor.previewScroll / editor.previewScrollMax) * (previewH - thumbH)
+                dxDrawRectangle(barX, previewY, 3, previewH, themeColors.panelAlt)
+                dxDrawUiRounded("preview_thumb", barX, round(thumbY), 3, round(thumbH), 2, themeColors.accent)
+            end
         end
     end
 end
@@ -4072,6 +4305,7 @@ function detectPanelHover(layout)
     end
     local lp = layout.left
     local rp = layout.right
+    if insideRect(cx, cy, 0, 0, layout.screenW, layout.topBarH) then return "topbar" end
     if insideRect(cx, cy, lp.x, lp.y, lp.w, lp.h) then return "leftpanel" end
     if insideRect(cx, cy, rp.x, rp.y, rp.w, rp.h) then return "rightpanel" end
     return ""
@@ -4112,6 +4346,7 @@ function renderEditor()
         _skipPanelDraw = false
         dxSetRenderTarget(_panelRT, true)
         dxSetBlendMode("modulate_add")
+        drawTopBar(layout)
         drawLeftPanel(layout)
         drawRightPanel(layout)
         drawColorPicker(sw, sh)
@@ -4133,6 +4368,7 @@ function renderEditor()
         dxDrawImage(0, 0, sw, sh, _panelRT)
     else
         _skipPanelDraw = false
+        drawTopBar(layout)
         drawLeftPanel(layout)
         drawRightPanel(layout)
         drawColorPicker(sw, sh)
@@ -4418,6 +4654,13 @@ function handleAction(action)
     elseif action == "paste_style"       then pasteSelectedStyle()
     elseif action == "preview_mode"      then editor.previewMode = not editor.previewMode; editor.panelDirty = true
     elseif action == "save_prefab"       then savePrefabFromSelection()
+    elseif action:sub(1,5) == "grid_" then
+        local size = tonumber(action:sub(6))
+        if size and size > 0 then
+            editor.canvas.grid = size
+            editor.panelDirty = true
+            outputChatBox("[DX UI Creator] Grid boyutu: " .. size .. "px", 75,144,255,true)
+        end
     elseif action:sub(1,7) == "preset_" then
         local i = tonumber(action:sub(8))
         local preset = CANVAS_PRESETS[i]
@@ -4454,6 +4697,16 @@ function handleAction(action)
         local copied = type(setClipboard)=="function" and setClipboard(editor.exportCache) ~= false
         if copied then outputChatBox("[DX UI Creator] Export kodu panoya kopyalandi.", 75,144,255,true)
         else outputChatBox("[DX UI Creator] Clipboard destegi yok, sag panelden al.", 230,164,52,true) end
+    elseif action == "tab_right_design" then
+        editor.rightPanelTab = "design"; editor.panelDirty = true
+    elseif action == "tab_right_code"   then
+        editor.rightPanelTab = "code";   editor.panelDirty = true
+    elseif action == "toggle_snap" then
+        editor.snapEnabled = not editor.snapEnabled; editor.panelDirty = true
+        outputChatBox("[DX UI Creator] Snap: "..(editor.snapEnabled and "Açık" or "Kapalı"), 123,104,238,true)
+    elseif action == "toggle_smart_snap" then
+        editor.smartSnapEnabled = not editor.smartSnapEnabled; editor.panelDirty = true
+        outputChatBox("[DX UI Creator] Kılavuz: "..(editor.smartSnapEnabled and "Açık" or "Kapalı"), 123,104,238,true)
     end
 end
 
@@ -4781,39 +5034,31 @@ addEventHandler("onClientKey", root, function(button, press)
         end
     end
 
-    if (button == "mouse_wheel_up" or button == "mouse_wheel_down") and editor.zoomArea then
+    -- Panel scroll'ları ZOOM'dan önce kontrol et (zoomArea panellerle çakışabilir)
+    if (button == "mouse_wheel_up" or button == "mouse_wheel_down") then
         local cx, cy = getScreenCursor()
-        if cx and insideRect(cx, cy, editor.zoomArea.x, editor.zoomArea.y, editor.zoomArea.w, editor.zoomArea.h) then
-            local delta = button == "mouse_wheel_up" and 0.1 or -0.1
-            editor.canvasZoom = clamp(editor.canvasZoom + delta, 0.2, 4.0)
-            cancelEvent(); return
-        end
-    end
-
-    if (button == "mouse_wheel_up" or button == "mouse_wheel_down") and editor.layersArea then
-        local cx, cy = getScreenCursor()
-        if cx and insideRect(cx, cy, editor.layersArea.x, editor.layersArea.y, editor.layersArea.w, editor.layersArea.h) then
-            editor.layersScroll = clamp((editor.layersScroll or 0) + (button=="mouse_wheel_up" and -1 or 1), 0, math.max(0,#editor.elements-1))
-            editor.panelDirty = true
-            cancelEvent(); return
-        end
-    end
-
-    if (button == "mouse_wheel_up" or button == "mouse_wheel_down") and editor.inspectorArea then
-        local cx, cy = getScreenCursor()
-        if cx and insideRect(cx, cy, editor.inspectorArea.x, editor.inspectorArea.y, editor.inspectorArea.w, editor.inspectorArea.h) then
-            editor.inspectorScroll = clamp((editor.inspectorScroll or 0) + (button=="mouse_wheel_up" and -36 or 36), 0, editor.inspectorScrollMax or 0)
-            editor.panelDirty = true
-            cancelEvent(); return
-        end
-    end
-
-    if (button == "mouse_wheel_up" or button == "mouse_wheel_down") and editor.previewArea then
-        local cx, cy = getScreenCursor()
-        if cx and insideRect(cx, cy, editor.previewArea.x, editor.previewArea.y, editor.previewArea.w, editor.previewArea.h) then
-            editor.previewScroll = clamp((editor.previewScroll or 0) + (button=="mouse_wheel_up" and -28 or 28), 0, editor.previewScrollMax or 0)
-            editor.panelDirty = true
-            cancelEvent(); return
+        if cx then
+            if editor.layersArea and insideRect(cx, cy, editor.layersArea.x, editor.layersArea.y, editor.layersArea.w, editor.layersArea.h) then
+                editor.layersScroll = clamp((editor.layersScroll or 0) + (button=="mouse_wheel_up" and -1 or 1), 0, math.max(0,#editor.elements-1))
+                editor.panelDirty = true
+                cancelEvent(); return
+            end
+            if editor.inspectorArea and insideRect(cx, cy, editor.inspectorArea.x, editor.inspectorArea.y, editor.inspectorArea.w, editor.inspectorArea.h) then
+                editor.inspectorScroll = clamp((editor.inspectorScroll or 0) + (button=="mouse_wheel_up" and -36 or 36), 0, editor.inspectorScrollMax or 0)
+                editor.panelDirty = true
+                cancelEvent(); return
+            end
+            if editor.previewArea and insideRect(cx, cy, editor.previewArea.x, editor.previewArea.y, editor.previewArea.w, editor.previewArea.h) then
+                editor.previewScroll = clamp((editor.previewScroll or 0) + (button=="mouse_wheel_up" and -28 or 28), 0, editor.previewScrollMax or 0)
+                editor.panelDirty = true
+                cancelEvent(); return
+            end
+            -- Panel dışındaysa ve canvas alanındaysa zoom yap
+            if editor.zoomArea and insideRect(cx, cy, editor.zoomArea.x, editor.zoomArea.y, editor.zoomArea.w, editor.zoomArea.h) then
+                local delta = button == "mouse_wheel_up" and 0.1 or -0.1
+                editor.canvasZoom = clamp(editor.canvasZoom + delta, 0.2, 4.0)
+                cancelEvent(); return
+            end
         end
     end
 
@@ -4915,9 +5160,23 @@ addEventHandler("onClientKey", root, function(button, press)
         for _, el in ipairs(editor.elements) do allIds[#allIds+1] = el.id end
         if #allIds > 0 then setSelection(allIds, allIds[#allIds]) end
     elseif ctrl and button=="s" then saveToFile()
+    elseif ctrl and (button=="=" or button=="+") then
+        editor.canvasZoom = clamp(editor.canvasZoom + 0.1, 0.2, 4.0)
+        editor.panelDirty = true
+    elseif ctrl and button=="-" then
+        editor.canvasZoom = clamp(editor.canvasZoom - 0.1, 0.2, 4.0)
+        editor.panelDirty = true
+    elseif ctrl and button=="0" then
+        editor.canvasZoom = 1.0
+        editor.canvasPanX = 0
+        editor.canvasPanY = 0
+        editor.panelDirty = true
     elseif button == "g" then
         editor.snapEnabled = not editor.snapEnabled
         outputChatBox("[DX UI Creator] Snap-to-grid: "..(editor.snapEnabled and "AÇIK" or "KAPALI"), 75,144,255,true)
+    elseif button == "h" then
+        editor.smartSnapEnabled = not editor.smartSnapEnabled
+        outputChatBox("[DX UI Creator] Akıllı kılavuz: "..(editor.smartSnapEnabled and "AÇIK" or "KAPALI"), 75,144,255,true)
     elseif button == "p" then
         editor.previewMode = not editor.previewMode
         editor.panelDirty = true
