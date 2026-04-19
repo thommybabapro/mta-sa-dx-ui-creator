@@ -52,7 +52,7 @@ local editor = {
     tooltip = nil,
     tooltipTime = 0,
     recentColors = {},
-    rightPanelTab = "design",  -- "design", "code"
+    rightPanelTab = "design",  
     theme = {
         overlay      = {12,  12,  14,  215},
         panel        = {28,  28,  31,  245},
@@ -194,11 +194,10 @@ local _previewCachedW  = 0
 local _previewCachedH  = 0
 local _lastPreviewCacheCode = ""
 local _lastPreviewScroll = -1
--- Canvas element render target (crisp text at any zoom level)
 local _canvasElemRT  = nil
 local _canvasElemRTW = 0
 local _canvasElemRTH = 0
-local _canvasRTMode  = false  -- true during RT draw: suppresses hover/selection overlay
+local _canvasRTMode  = false 
 
 local COMMON_EXPORT_KEYS = {
     "visible", "locked", "parentId", "groupId",
@@ -2818,7 +2817,7 @@ local function appendCommonExportRuntime(L, hasCustomFonts, hasHttpImages)
     ln("        local t=activeInput.text or ''")
     ln("        if #t > 0 then")
     ln("            local u=t:gsub('[\\128-\\191]', '')")
-    ln("            if #u>0 then activeInput.text=delChar(t) end") -- Need a better utf8 delete, but string.sub works for standard
+    ln("            if #u>0 then activeInput.text=delChar(t) end") 
     ln("        end")
     ln("    end")
     ln("end)")
@@ -3366,7 +3365,6 @@ local function drawCanvas(layout)
         dxDrawImage(layout.canvas.x, layout.canvas.y, layout.canvas.w, layout.canvas.h, gridRT, 0, 0, 0, tocolor(255,255,255,255))
     end
 
-    -- Zoom < 1.0 olduğunda dxDrawText scale<1 = blur; canvas RT ile native çiz, sonra küçült
     local useRT = layout.canvas.scale < 0.999
     if useRT then
         local cw, ch = editor.canvas.width, editor.canvas.height
@@ -3387,7 +3385,6 @@ local function drawCanvas(layout)
             _canvasRTMode = false
             dxSetRenderTarget()
             dxDrawImage(layout.canvas.x, layout.canvas.y, layout.canvas.w, layout.canvas.h, _canvasElemRT, 0, 0, 0, tocolor(255,255,255,255))
-            -- Selection overlay ve handle'lar ekran koordinatında kalsın
             for _, element in ipairs(editor.elements) do
                 if element.visible ~= false and isElementSelected(element.id) then
                     local canvasX, canvasY, canvasW, canvasH = getElementCanvasRect(element)
@@ -3417,7 +3414,6 @@ local function drawCanvas(layout)
             end
         end
     else
-        -- scale >= 1.0: dxDrawText scale>=1 keskin, direkt çiz
         if _canvasElemRT and isElement(_canvasElemRT) then
             destroyElement(_canvasElemRT)
             _canvasElemRT = nil
@@ -3586,15 +3582,12 @@ local function drawTopBar(layout)
         dxDrawRectangle(0, 0, sw, th, themeColors.panel)
         dxDrawRectangle(0, th-1, sw, 1, themeColors.borderSubtle)
 
-        -- Logo / title
         dxDrawText("DX UI Creator", 16, 0, 200, th, themeColors.text, 1, UI_FONT_BOLD_SM, "left", "center", false, false, false)
 
-        -- Canvas boyutu etiket
         local presetLabelX = 208
         dxDrawText("Canvas:", presetLabelX, 0, presetLabelX+54, th, themeColors.muted, 1, UI_FONT_MEDIUM_XS, "left", "center", false, false, false)
     end
 
-    -- Canvas preset mini butonları — kısa etiket kullan (genişlik x yükseklik)
     local presetShort = {"720p","1080p","768p","600p","1440p","1024"}
     local pBh = 28
     local pBw = 58
@@ -3607,13 +3600,11 @@ local function drawTopBar(layout)
         drawSmallButton(bx, by, pBw, pBh, presetShort[i] or preset.label, "preset_"..i, active)
     end
 
-    -- Ayırıcı
     local sepX = presetStartX + #CANVAS_PRESETS*(pBw+pGap) + 8
     if not _skipPanelDraw then
         dxDrawRectangle(sepX, 10, 1, th-20, themeColors.borderSubtle)
     end
 
-    -- Grid label + butonlar
     local gridX = sepX + 12
     if not _skipPanelDraw then
         dxDrawText("Grid", gridX, 0, gridX+26, th, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "center", false, false, false)
@@ -3625,23 +3616,19 @@ local function drawTopBar(layout)
         drawSmallButton(bx, by, gBw, 26, tostring(gs), "grid_"..gs, editor.canvas.grid == gs)
     end
 
-    -- Sağ taraf: zoom + snap + guide
     local rightEdge = sw - layout.right.w - 12
     local zBw = 52
     local zBh = 28
     local zBy = (th - zBh) / 2
-    -- Zoom bilgisi (tıklanamaz, sadece metin)
     if not _skipPanelDraw then
         local zText = string.format("%.0f%%", editor.canvasZoom * 100)
         local zTextX = rightEdge - zBw*3 - 12
         dxDrawText(zText, zTextX, 0, zTextX+44, th, themeColors.muted, 1, UI_FONT_BOLD_SM, "right", "center", false, false, false)
     end
-    -- Snap toggle buton
     local snapBx = rightEdge - zBw*2 - 8
     local snapActive = editor.snapEnabled
     local snapStyle = snapActive and {normal=editor.theme.accentActive, hover=editor.theme.accent} or {normal=editor.theme.panelAlt, hover=editor.theme.panelHover}
     drawButton(snapBx, zBy, zBw, zBh, "SNAP", "toggle_snap", snapStyle, nil)
-    -- Guide toggle buton
     local guideBx = rightEdge - zBw - 4
     local guideActive = editor.smartSnapEnabled
     local guideStyle = guideActive and {normal=editor.theme.accentActive, hover=editor.theme.accent} or {normal=editor.theme.panelAlt, hover=editor.theme.panelHover}
@@ -3654,7 +3641,6 @@ function drawLeftPanel(layout)
     local py = panel.y
 
     if not _skipPanelDraw then
-        -- Panel arkaplanı (kenar çizgisi sağda)
         dxDrawRectangle(px, py, panel.w, panel.h, themeColors.panel)
         dxDrawRectangle(px+panel.w-1, py, 1, panel.h, themeColors.borderSubtle)
     end
@@ -3662,7 +3648,6 @@ function drawLeftPanel(layout)
     local pad = 12
     local cy2 = py + pad
 
-    -- ── SECTION: Elementler ──────────────────────────────
     if not _skipPanelDraw then
         dxDrawText("ELEMENTLER", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
     end
@@ -3688,14 +3673,12 @@ function drawLeftPanel(layout)
     end
     cy2 = cy2 + math.ceil(#addButtons/2) * (bh+5)
 
-    -- ── AYIRICI ──────────────────────────────────────────
     cy2 = cy2 + 8
     if not _skipPanelDraw then
         dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
     end
     cy2 = cy2 + 10
 
-    -- ── SECTION: Dosya ───────────────────────────────────
     if not _skipPanelDraw then
         dxDrawText("DOSYA", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
     end
@@ -3710,14 +3693,12 @@ function drawLeftPanel(layout)
     drawButton(px+pad+bw+gutter, cy2+fbh+4,    bw, fbh, "Kopyala",   "copy_export",    sa, "copy")
     cy2 = cy2 + (fbh+4)*2
 
-    -- ── AYIRICI ──────────────────────────────────────────
     cy2 = cy2 + 8
     if not _skipPanelDraw then
         dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
     end
     cy2 = cy2 + 10
 
-    -- ── SECTION: Şablonlar ───────────────────────────────
     if not _skipPanelDraw then
         dxDrawText("ŞABLONLAR", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
     end
@@ -3734,14 +3715,12 @@ function drawLeftPanel(layout)
     end
     cy2 = cy2 + math.ceil(#templateBtns/2)*26
 
-    -- ── AYIRICI ──────────────────────────────────────────
     cy2 = cy2 + 8
     if not _skipPanelDraw then
         dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
     end
     cy2 = cy2 + 10
 
-    -- ── SECTION: Kısayollar ──────────────────────────────
     if not _skipPanelDraw then
         dxDrawText("KISAYOLLAR", px+pad, cy2, px+panel.w-pad, cy2+16, themeColors.muted, 1, UI_FONT_BOLD_XS, "left", "top", false, false, false)
         local shortcuts = {
@@ -3767,14 +3746,12 @@ function drawLeftPanel(layout)
         cy2 = cy2 + 18 + 11*16
     end
 
-    -- ── AYIRICI ──────────────────────────────────────────
     cy2 = cy2 + 8
     if not _skipPanelDraw then
         dxDrawRectangle(px+pad, cy2, panel.w-pad*2, 1, themeColors.borderSubtle)
     end
     cy2 = cy2 + 8
 
-    -- ── Katmanlar ────────────────────────────────────────
     drawLayersPanel(px+pad, cy2, panel.w-pad*2, panel.y+panel.h - cy2 - pad)
 end
 function drawPropertyRow(x, y, w, property, element)
@@ -3873,7 +3850,6 @@ function drawRightPanel(layout)
         dxDrawRectangle(px, py, 1, panel.h, themeColors.borderSubtle)
     end
 
-    -- Sekme başlıkları
     local tabH   = 44
     local tabs   = {{"Design","design"}, {"Kod","code"}}
     local tabW   = panel.w / #tabs
@@ -5034,7 +5010,6 @@ addEventHandler("onClientKey", root, function(button, press)
         end
     end
 
-    -- Panel scroll'ları ZOOM'dan önce kontrol et (zoomArea panellerle çakışabilir)
     if (button == "mouse_wheel_up" or button == "mouse_wheel_down") then
         local cx, cy = getScreenCursor()
         if cx then
@@ -5053,7 +5028,6 @@ addEventHandler("onClientKey", root, function(button, press)
                 editor.panelDirty = true
                 cancelEvent(); return
             end
-            -- Panel dışındaysa ve canvas alanındaysa zoom yap
             if editor.zoomArea and insideRect(cx, cy, editor.zoomArea.x, editor.zoomArea.y, editor.zoomArea.w, editor.zoomArea.h) then
                 local delta = button == "mouse_wheel_up" and 0.1 or -0.1
                 editor.canvasZoom = clamp(editor.canvasZoom + delta, 0.2, 4.0)
